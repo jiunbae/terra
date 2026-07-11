@@ -1,0 +1,364 @@
+"""PlanetSpec: 소설 텍스트에서 추출하는 구조화된 행성 명세.
+
+이 스키마는 세 곳에서 공유되는 계약이다:
+- Gemini responseSchema (GEMINI_SCHEMA)
+- 백엔드 검증/클램핑 (Pydantic 모델)
+- 프론트엔드 3D 렌더러 파라미터 (frontend/src/types.ts와 동기 유지)
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+class Planet(BaseModel):
+    name: str = "이름 없는 행성"
+    shape: str = "sphere"  # sphere | oblate | irregular
+    oblateness: float = Field(default=0.0, ge=0.0, le=0.35)
+    radius_km: float = Field(default=6371, gt=100, lt=200000)
+    gravity_g: float = Field(default=1.0, gt=0.01, lt=20)
+    rotation_hours: float = Field(default=24, gt=0.1, lt=10000)
+    axial_tilt_deg: float = Field(default=23.5, ge=0, le=90)
+
+
+class Star(BaseModel):
+    count: int = Field(default=1, ge=0, le=3)
+    color_hex: str = "#fff4e0"
+    colors_hex: list[str] = Field(default_factory=list)
+    intensity: float = Field(default=1.0, ge=0.2, le=3.0)
+
+
+class Atmosphere(BaseModel):
+    present: bool = True
+    density: float = Field(default=0.5, ge=0.0, le=1.0)
+    color_hex: str = "#7ab8ff"
+    composition: str = ""
+    weather_summary: str = ""
+
+
+class Climate(BaseModel):
+    avg_temp_c: float = Field(default=15, ge=-270, le=1500)
+    temp_min_c: float = -20
+    temp_max_c: float = 45
+    humidity: float = Field(default=0.5, ge=0.0, le=1.0)
+    phenomena: list[str] = Field(default_factory=list)
+
+
+class Palette(BaseModel):
+    ocean_deep: str = "#0b2e59"
+    ocean_shallow: str = "#1d6fa5"
+    shore: str = "#c2b280"
+    lowland: str = "#4a7c3a"
+    midland: str = "#7a6f45"
+    highland: str = "#8a8578"
+    peak: str = "#e8e8e8"
+
+
+class Surface(BaseModel):
+    ocean_coverage: float = Field(default=0.6, ge=0.0, le=1.0)
+    terrain_roughness: float = Field(default=0.5, ge=0.0, le=1.0)
+    mountain_height: float = Field(default=0.5, ge=0.0, le=1.0)
+    ice_coverage: float = Field(default=0.1, ge=0.0, le=1.0)
+    vegetation_coverage: float = Field(default=0.4, ge=0.0, le=1.0)
+    lava_activity: float = Field(default=0.0, ge=0.0, le=1.0)
+    city_lights: float = Field(default=0.0, ge=0.0, le=1.0)
+    feature_type: Literal[
+        "continents",
+        "archipelago",
+        "cratered",
+        "canyons",
+        "dunes",
+        "crystalline",
+        "volcanic",
+        "artificial",
+    ] = "continents"
+    feature_scale: float = Field(default=0.5, ge=0.0, le=1.0)
+    biome_contrast: float = Field(default=0.5, ge=0.0, le=1.0)
+    material_type: Literal[
+        "rock",
+        "sand",
+        "ice",
+        "crystal",
+        "metal",
+        "organic",
+        "volcanic",
+        "mixed",
+    ] = "mixed"
+    landmarks: list[
+        Literal[
+            "rock_spires",
+            "crystal_fields",
+            "cave_openings",
+            "volcanic_vents",
+            "dune_ridges",
+            "artificial_structures",
+            "giant_flora",
+            "ice_spires",
+        ]
+    ] = Field(default_factory=list)
+    visual_prompt: str = ""
+    palette: Palette = Palette()
+    description: str = ""
+
+
+class Clouds(BaseModel):
+    coverage: float = Field(default=0.4, ge=0.0, le=1.0)
+    color_hex: str = "#ffffff"
+    speed: float = Field(default=0.3, ge=0.0, le=1.0)
+    storminess: float = Field(default=0.2, ge=0.0, le=1.0)
+
+
+class Rings(BaseModel):
+    present: bool = False
+    color_hex: str = "#c9b797"
+    inner_ratio: float = Field(default=1.4, ge=1.1, le=3.0)
+    outer_ratio: float = Field(default=2.2, ge=1.2, le=5.0)
+    opacity: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
+class Moon(BaseModel):
+    name: str = ""
+    size_ratio: float = Field(default=0.27, ge=0.01, le=0.8)
+    distance_ratio: float = Field(default=8.0, ge=2.0, le=30.0)
+    color_hex: str = "#b8b8b8"
+
+
+class Inhabitant(BaseModel):
+    name: str = ""
+    category: str = ""  # 예: 지성체, 동물, 식물, 기계
+    height_m: float = Field(default=1.7, gt=0.001, lt=1000)
+    appearance: str = ""
+    physiology: str = ""
+    culture: str = ""
+    gravity_adaptation: str = ""
+    portrait_prompt: str = ""  # 이후 이미지 생성 단계에서 사용
+
+
+class Inference(BaseModel):
+    topic: str
+    claim: str
+    confidence: str = "inferred"  # stated | inferred | speculative
+    evidence_quote: str = ""
+    reasoning: str = ""
+
+
+class PlanetSpec(BaseModel):
+    planet: Planet = Planet()
+    star: Star = Star()
+    atmosphere: Atmosphere = Atmosphere()
+    climate: Climate = Climate()
+    surface: Surface = Surface()
+    clouds: Clouds = Clouds()
+    rings: Rings = Rings()
+    moons: list[Moon] = Field(default_factory=list)
+    inhabitants: list[Inhabitant] = Field(default_factory=list)
+    inferences: list[Inference] = Field(default_factory=list)
+
+
+def _hex() -> dict[str, Any]:
+    return {"type": "string", "description": "#rrggbb 형식 hex 색상"}
+
+
+def _num(lo: float | None = None, hi: float | None = None, desc: str = "") -> dict[str, Any]:
+    d: dict[str, Any] = {"type": "number"}
+    if desc:
+        d["description"] = desc
+    if lo is not None:
+        d["minimum"] = lo
+    if hi is not None:
+        d["maximum"] = hi
+    return d
+
+
+# Gemini responseSchema (OpenAPI 3.0 부분집합)
+GEMINI_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "planet": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "shape": {"type": "string", "enum": ["sphere", "oblate", "irregular"]},
+                "oblateness": _num(0, 0.35, "편평도. 빠른 자전/타원형 묘사 시 큼"),
+                "radius_km": _num(100, 200000),
+                "gravity_g": _num(0.01, 20, "지구=1 기준 표면 중력"),
+                "rotation_hours": _num(0.1, 10000),
+                "axial_tilt_deg": _num(0, 90),
+            },
+            "required": ["name", "shape", "gravity_g", "radius_km"],
+        },
+        "star": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "minimum": 0, "maximum": 3},
+                "color_hex": _hex(),
+                "colors_hex": {
+                    "type": "array",
+                    "description": "항성별 빛 색상. count와 같은 개수",
+                    "items": _hex(),
+                },
+                "intensity": _num(0.2, 3.0),
+            },
+            "required": ["count", "color_hex", "colors_hex"],
+        },
+        "atmosphere": {
+            "type": "object",
+            "properties": {
+                "present": {"type": "boolean"},
+                "density": _num(0, 1),
+                "color_hex": _hex(),
+                "composition": {"type": "string"},
+                "weather_summary": {"type": "string"},
+            },
+        },
+        "climate": {
+            "type": "object",
+            "properties": {
+                "avg_temp_c": _num(-270, 1500),
+                "temp_min_c": _num(-270, 1500),
+                "temp_max_c": _num(-270, 1500),
+                "humidity": _num(0, 1),
+                "phenomena": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "surface": {
+            "type": "object",
+            "properties": {
+                "ocean_coverage": _num(0, 1),
+                "terrain_roughness": _num(0, 1),
+                "mountain_height": _num(0, 1),
+                "ice_coverage": _num(0, 1),
+                "vegetation_coverage": _num(0, 1),
+                "lava_activity": _num(0, 1),
+                "city_lights": _num(0, 1, "문명의 야간 불빛 정도"),
+                "feature_type": {
+                    "type": "string",
+                    "description": "묘사에서 가장 두드러지는 지표 구조 유형",
+                    "enum": [
+                        "continents",
+                        "archipelago",
+                        "cratered",
+                        "canyons",
+                        "dunes",
+                        "crystalline",
+                        "volcanic",
+                        "artificial",
+                    ],
+                },
+                "feature_scale": _num(0, 1, "특징 구조의 크기와 두드러짐"),
+                "biome_contrast": _num(0, 1, "서로 다른 생태/지질 구역의 대비"),
+                "material_type": {
+                    "type": "string",
+                    "description": "확대 시 보이는 대표 표면 재질",
+                    "enum": ["rock", "sand", "ice", "crystal", "metal", "organic", "volcanic", "mixed"],
+                },
+                "landmarks": {
+                    "type": "array",
+                    "description": "원문에서 시각적으로 드러나는 지표 랜드마크. 명시된 것만 선택",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "rock_spires",
+                            "crystal_fields",
+                            "cave_openings",
+                            "volcanic_vents",
+                            "dune_ridges",
+                            "artificial_structures",
+                            "giant_flora",
+                            "ice_spires",
+                        ],
+                    },
+                },
+                "visual_prompt": {
+                    "type": "string",
+                    "description": "행성 전체 이미지 생성용 영어 시각 지시. 원문에 근거한 독특한 지형·날씨·색만 구체적으로 기술",
+                },
+                "palette": {
+                    "type": "object",
+                    "properties": {
+                        "ocean_deep": _hex(),
+                        "ocean_shallow": _hex(),
+                        "shore": _hex(),
+                        "lowland": _hex(),
+                        "midland": _hex(),
+                        "highland": _hex(),
+                        "peak": _hex(),
+                    },
+                },
+                "description": {"type": "string"},
+            },
+            "required": ["feature_type", "feature_scale", "biome_contrast", "material_type", "landmarks", "visual_prompt"],
+        },
+        "clouds": {
+            "type": "object",
+            "properties": {
+                "coverage": _num(0, 1),
+                "color_hex": _hex(),
+                "speed": _num(0, 1),
+                "storminess": _num(0, 1),
+            },
+        },
+        "rings": {
+            "type": "object",
+            "properties": {
+                "present": {"type": "boolean"},
+                "color_hex": _hex(),
+                "inner_ratio": _num(1.1, 3.0),
+                "outer_ratio": _num(1.2, 5.0),
+                "opacity": _num(0, 1),
+            },
+        },
+        "moons": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "size_ratio": _num(0.01, 0.8),
+                    "distance_ratio": _num(2.0, 30.0),
+                    "color_hex": _hex(),
+                },
+            },
+        },
+        "inhabitants": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "category": {"type": "string"},
+                    "height_m": _num(0.001, 1000),
+                    "appearance": {"type": "string"},
+                    "physiology": {"type": "string"},
+                    "culture": {"type": "string"},
+                    "gravity_adaptation": {"type": "string"},
+                    "portrait_prompt": {
+                        "type": "string",
+                        "description": "이 거주민의 초상을 그리기 위한 영어 이미지 생성 프롬프트",
+                    },
+                },
+                "required": ["name", "appearance"],
+            },
+        },
+        "inferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["stated", "inferred", "speculative"],
+                    },
+                    "evidence_quote": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["topic", "claim", "confidence"],
+            },
+        },
+    },
+    "required": ["planet", "surface", "inferences"],
+}

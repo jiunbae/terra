@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-labelledby="title desc">
+  <title id="title">Terra — fiction to explorable worlds</title>
+  <desc id="desc">A luminous alien planet surrounded by analysis and worldbuilding interface elements.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070a17"/>
+      <stop offset="0.52" stop-color="#10152e"/>
+      <stop offset="1" stop-color="#071b22"/>
+    </linearGradient>
+    <radialGradient id="planet" cx="35%" cy="28%" r="72%">
+      <stop offset="0" stop-color="#f2f0ff"/>
+      <stop offset="0.24" stop-color="#9da7ff"/>
+      <stop offset="0.52" stop-color="#536bd8"/>
+      <stop offset="0.78" stop-color="#17395d"/>
+      <stop offset="1" stop-color="#07101d"/>
+    </radialGradient>
+    <linearGradient id="land" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d8fff4"/>
+      <stop offset="0.5" stop-color="#75d8c4"/>
+      <stop offset="1" stop-color="#236e76"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#8a7dff"/>
+      <stop offset="1" stop-color="#55e6c1"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+    <clipPath id="globe"><circle cx="915" cy="245" r="154"/></clipPath>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#afbbff" stroke-opacity=".055"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="480" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="480" rx="28" fill="url(#grid)"/>
+  <circle cx="925" cy="220" r="220" fill="#4d73ff" opacity=".09" filter="url(#soft)"/>
+  <circle cx="1020" cy="330" r="170" fill="#36e3bb" opacity=".07" filter="url(#soft)"/>
+
+  <g fill="#dce3ff">
+    <circle cx="80" cy="72" r="1.5" opacity=".8"/><circle cx="194" cy="402" r="1" opacity=".5"/>
+    <circle cx="722" cy="68" r="1" opacity=".7"/><circle cx="1110" cy="92" r="1.5" opacity=".55"/>
+    <circle cx="661" cy="408" r="1.5" opacity=".7"/><circle cx="1040" cy="423" r="1" opacity=".65"/>
+  </g>
+
+  <g transform="translate(74 74)">
+    <rect width="52" height="52" rx="15" fill="#111a38" stroke="#8595ff" stroke-opacity=".5"/>
+    <circle cx="26" cy="26" r="14" fill="none" stroke="url(#accent)" stroke-width="2.5"/>
+    <path d="M12 28c8-8 20-12 29-5M16 37c8-2 16 0 22 5" fill="none" stroke="#bceee4" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <text x="74" y="190" fill="#f4f6ff" font-family="Arial, sans-serif" font-size="70" font-weight="750" letter-spacing="12">TERRA</text>
+  <rect x="74" y="212" width="392" height="4" rx="2" fill="url(#accent)"/>
+  <text x="74" y="264" fill="#b7c0e5" font-family="Arial, sans-serif" font-size="22" font-weight="450">FICTION → PHYSICS → LIVING WORLDS</text>
+  <text x="74" y="308" fill="#7884aa" font-family="Arial, sans-serif" font-size="17">Analyze · Simulate · Generate · Explore · Share</text>
+
+  <g transform="translate(74 350)" font-family="Arial, sans-serif" font-size="13">
+    <rect width="132" height="38" rx="19" fill="#171f40" stroke="#7283ec" stroke-opacity=".45"/>
+    <circle cx="21" cy="19" r="4" fill="#7f90ff"/><text x="34" y="24" fill="#cbd2f4">WORLD MODEL</text>
+    <rect x="144" width="114" height="38" rx="19" fill="#102a30" stroke="#59d9ba" stroke-opacity=".38"/>
+    <circle cx="165" cy="19" r="4" fill="#59d9ba"/><text x="178" y="24" fill="#c6eee5">LOCAL AI</text>
+    <rect x="270" width="122" height="38" rx="19" fill="#171f40" stroke="#7283ec" stroke-opacity=".45"/>
+    <circle cx="291" cy="19" r="4" fill="#a89aff"/><text x="304" y="24" fill="#cbd2f4">THREE.JS</text>
+  </g>
+
+  <g clip-path="url(#globe)">
+    <rect x="750" y="80" width="330" height="330" fill="url(#planet)"/>
+    <path d="M782 126c48-31 97-20 118 8 17 23 8 47 34 62 19 11 50 2 62 22 10 18-11 31-7 51 6 27 42 32 49 58 6 23-14 43-35 54-28 14-57 6-77-10-25-20-28-49-59-58-23-7-54 1-70-18-18-22 2-43 1-66-2-33-42-48-16-103z" fill="url(#land)" opacity=".92"/>
+    <path d="M968 92c-11 25-2 50 19 67 16 13 37 19 46 38 8 17 3 39 15 53 10 12 25 15 38 17" fill="none" stroke="#d9fff5" stroke-opacity=".55" stroke-width="7"/>
+    <path d="M771 260c45-13 81 4 113 29 31 24 70 30 103 17" fill="none" stroke="#a7f5e2" stroke-opacity=".35" stroke-width="10"/>
+    <g fill="none" stroke="#dce4ff" stroke-opacity=".16">
+      <ellipse cx="915" cy="245" rx="153" ry="56"/><ellipse cx="915" cy="245" rx="153" ry="105"/>
+      <path d="M915 91c-50 44-63 108-63 154s13 110 63 154M915 91c50 44 63 108 63 154s-13 110-63 154"/>
+    </g>
+  </g>
+  <circle cx="915" cy="245" r="154" fill="none" stroke="#b9c6ff" stroke-opacity=".42" stroke-width="2" filter="url(#glow)"/>
+  <ellipse cx="915" cy="245" rx="208" ry="55" transform="rotate(-12 915 245)" fill="none" stroke="url(#accent)" stroke-opacity=".38" stroke-width="2"/>
+  <circle cx="1115" cy="202" r="10" fill="#b9c6ff" opacity=".8"/>
+
+  <g transform="translate(654 115)" font-family="Arial, sans-serif">
+    <rect width="118" height="72" rx="12" fill="#0b1126" fill-opacity=".82" stroke="#6677ce" stroke-opacity=".32"/>
+    <text x="14" y="23" fill="#7f8bb9" font-size="10">GRAVITY</text><text x="14" y="49" fill="#edf0ff" font-size="20" font-weight="650">0.82 g</text>
+    <path d="M76 50l10-11 8 5 10-17" fill="none" stroke="#65dfc0" stroke-width="2"/>
+  </g>
+  <g transform="translate(1002 328)" font-family="Arial, sans-serif">
+    <rect width="124" height="72" rx="12" fill="#0b1126" fill-opacity=".82" stroke="#6677ce" stroke-opacity=".32"/>
+    <text x="14" y="23" fill="#7f8bb9" font-size="10">ATMOSPHERE</text><text x="14" y="49" fill="#edf0ff" font-size="16" font-weight="650">IRIDESCENT</text>
+  </g>
+
+  <rect x=".75" y=".75" width="1198.5" height="478.5" rx="27.25" fill="none" stroke="#8d9bdf" stroke-opacity=".16" stroke-width="1.5"/>
+</svg>
