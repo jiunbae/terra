@@ -7,11 +7,11 @@ production:
 	./start.sh --production
 
 build:
-	cd frontend && npm run build
+	./scripts/build_frontend_atomic.sh
 
 test:
-	cd frontend && npm run build
-	cd backend && uv run python -m unittest discover -s tests -v
+	cd frontend && npm run lint && npm run build
+	cd backend && uv run pytest -q
 
 install-images:
-	uv tool install --upgrade mflux
+	uv tool install mflux==0.18.0

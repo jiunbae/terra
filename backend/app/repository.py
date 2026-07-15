@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import hashlib
 import hmac
 import secrets
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,16 +20,44 @@ DB_PATH = DATA_DIR / "terra.sqlite3"
 
 
 def _connect() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=10000")
+    connection.execute("PRAGMA synchronous=NORMAL")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
 
+@contextlib.contextmanager
+def _db(*, write: bool = False) -> Iterator[sqlite3.Connection]:
+    """트랜잭션(커밋/롤백)을 감싸고, 블록을 벗어나면 연결을 확실히 닫는다."""
+    connection = _connect()
+    try:
+        if write:
+            # JSON 자산 필드는 read-modify-write이므로 SELECT 전에 쓰기 잠금을
+            # 확보해야 동시 업데이트가 서로의 결과를 잃지 않는다.
+            connection.execute("BEGIN IMMEDIATE")
+        yield connection
+        if write:
+            connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def initialize() -> None:
-    with _connect() as db:
+    # journal_mode는 DB 파일에 지속된다. 매 요청 연결마다 재설정하면 불필요한
+    # 잠금/PRAGMA 비용이 생기므로 초기화 시 한 번만 적용한다.
+    connection = _connect()
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    finally:
+        connection.close()
+    with _db(write=True) as db:
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS planets (
@@ -57,6 +87,15 @@ def initialize() -> None:
         db.execute("CREATE INDEX IF NOT EXISTS idx_planets_public_created ON planets(is_public, created_at DESC)")
 
 
+def healthcheck_database() -> bool:
+    """Return whether SQLite can serve a simple read on a fresh connection."""
+    try:
+        with _db() as db:
+            return db.execute("SELECT 1").fetchone()[0] == 1
+    except sqlite3.Error:
+        return False
+
+
 def _row_to_detail(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -84,7 +123,7 @@ def save_planet(
     planet_id = secrets.token_urlsafe(9)
     edit_token = secrets.token_urlsafe(24)
     edit_token_hash = hashlib.sha256(edit_token.encode()).hexdigest()
-    with _connect() as db:
+    with _db(write=True) as db:
         db.execute(
             """
             INSERT INTO planets (
@@ -119,7 +158,7 @@ def save_planet(
 
 
 def list_public_planets(*, limit: int = 40, offset: int = 0) -> list[dict[str, Any]]:
-    with _connect() as db:
+    with _db() as db:
         rows = db.execute(
             """
             SELECT id, name, description, feature_type, gravity_g, inhabitant_count,
@@ -134,15 +173,21 @@ def list_public_planets(*, limit: int = 40, offset: int = 0) -> list[dict[str, A
     return [dict(row) for row in rows]
 
 
-def get_planet(planet_id: str) -> dict[str, Any] | None:
-    with _connect() as db:
-        row = db.execute("SELECT * FROM planets WHERE id = ?", (planet_id,)).fetchone()
+def get_planet(planet_id: str, *, public_only: bool = False) -> dict[str, Any] | None:
+    with _db() as db:
+        if public_only:
+            row = db.execute(
+                "SELECT * FROM planets WHERE id = ? AND is_public = 1",
+                (planet_id,),
+            ).fetchone()
+        else:
+            row = db.execute("SELECT * FROM planets WHERE id = ?", (planet_id,)).fetchone()
     return _row_to_detail(row) if row is not None else None
 
 
 def update_cover(planet_id: str, cover_image_url: str, edit_token: str) -> dict[str, Any] | None:
     now = datetime.now(timezone.utc).isoformat()
-    with _connect() as db:
+    with _db(write=True) as db:
         auth = db.execute("SELECT edit_token_hash FROM planets WHERE id = ?", (planet_id,)).fetchone()
         if auth is None:
             return None
@@ -173,7 +218,7 @@ def update_image_asset(
 ) -> dict[str, Any] | None:
     """편집 권한을 검증한 뒤 행성/거주민 생성 이미지를 하나 갱신한다."""
     now = datetime.now(timezone.utc).isoformat()
-    with _connect() as db:
+    with _db(write=True) as db:
         row = db.execute(
             "SELECT edit_token_hash, image_assets_json FROM planets WHERE id = ?",
             (planet_id,),

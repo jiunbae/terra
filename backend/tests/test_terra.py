@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.derive import derive_physics
 from app.images import (
@@ -34,6 +37,16 @@ class PhysicsTests(unittest.TestCase):
         physics = derive_physics(spec)
         self.assertLess(physics["effective_equator_gravity_g"], spec.planet.gravity_g)
         self.assertGreater(physics["centrifugal_acceleration_ms2"], 0)
+
+
+class SchemaBoundaryTests(unittest.TestCase):
+    def test_invalid_color_and_oversized_collections_are_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            PlanetSpec.model_validate({"atmosphere": {"color_hex": "blue"}})
+        with self.assertRaises(ValidationError):
+            PlanetSpec.model_validate(
+                {"climate": {"phenomena": [f"storm-{index}" for index in range(17)]}}
+            )
 
 
 class PromptTests(unittest.TestCase):
@@ -113,6 +126,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("available", response.json())
 
+    def test_liveness_and_readiness_have_distinct_dependency_semantics(self) -> None:
+        self.assertEqual(self.client.get("/api/livez").status_code, 200)
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEYS": "test-key"}),
+            patch("app.main.healthcheck_database", return_value=True),
+            patch(
+                "app.main.shutil.disk_usage",
+                return_value=SimpleNamespace(total=10_000, used=1_000, free=9_000 * 1024 * 1024),
+            ),
+        ):
+            response = self.client.get("/api/readyz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ready")
+
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEYS": "", "GEMINI_API_KEY": ""}),
+            patch("app.main.healthcheck_database", return_value=True),
+            patch(
+                "app.main.shutil.disk_usage",
+                return_value=SimpleNamespace(total=10_000, used=1_000, free=9_000 * 1024 * 1024),
+            ),
+        ):
+            response = self.client.get("/api/readyz")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["checks"]["analysis_provider"])
+
     def test_invalid_inhabitant_index_is_rejected_before_generation(self) -> None:
         response = self.client.post(
             "/api/image/generate",
@@ -137,6 +176,68 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["id"], "test-job")
         self.assertEqual(response.json()["status"], "queued")
+
+    def test_image_job_can_be_cancelled_by_capability_id(self) -> None:
+        job = ImageJob(
+            id="cancel-job",
+            status="failed",
+            created_at=1,
+            updated_at=2,
+            kind="surface",
+            seed=42,
+            error="이미지 생성 작업이 취소되었습니다.",
+        )
+        with patch("app.main.image_jobs.cancel", new=AsyncMock(return_value=job)):
+            response = self.client.delete("/api/image/jobs/cancel-job")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "failed")
+        self.assertIn("취소", response.json()["error"])
+
+    def test_save_uses_server_derived_physics_and_model(self) -> None:
+        spec = PlanetSpec()
+        with patch(
+            "app.main.save_planet",
+            return_value={"id": "saved", "spec": spec.model_dump(), "edit_token": "token"},
+        ) as save:
+            response = self.client.post(
+                "/api/planets",
+                json={
+                    "spec": spec.model_dump(),
+                    "physics": {"mass_earths": 999999},
+                    "model": "untrusted-client-model",
+                    "public": True,
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        kwargs = save.call_args.kwargs
+        self.assertAlmostEqual(kwargs["physics"]["mass_earths"], 1.0, delta=0.01)
+        self.assertNotEqual(kwargs["model"], "untrusted-client-model")
+
+    def test_private_save_and_nested_generated_path_are_rejected(self) -> None:
+        spec = PlanetSpec().model_dump()
+        private = self.client.post(
+            "/api/planets",
+            json={"spec": spec, "physics": {}, "model": "client", "public": False},
+        )
+        self.assertEqual(private.status_code, 422)
+        nested = self.client.post(
+            "/api/planets",
+            json={
+                "spec": spec,
+                "physics": {},
+                "model": "client",
+                "cover_image_url": "/generated/nested/image.png",
+                "public": True,
+            },
+        )
+        self.assertEqual(nested.status_code, 422)
+
+    def test_non_public_saved_planet_is_not_shared(self) -> None:
+        with patch("app.main.get_planet", return_value=None) as get:
+            response = self.client.get("/api/planets/private-id")
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(get.call_args.kwargs["public_only"])
 
 
 class RepositoryTests(unittest.TestCase):

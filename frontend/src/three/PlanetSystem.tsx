@@ -326,7 +326,7 @@ function TerrainPlanet({ spec, quality }: { spec: PlanetSpec; quality: number })
   )
 }
 
-function SolidPrecipitation({ spec }: { spec: PlanetSpec }) {
+function SolidPrecipitation({ spec, motionScale }: { spec: PlanetSpec; motionScale: number }) {
   const pointsRef = useRef<THREE.Points>(null)
   const materialRef = useRef<THREE.PointsMaterial>(null)
   const count = 360
@@ -354,7 +354,7 @@ function SolidPrecipitation({ spec }: { spec: PlanetSpec }) {
     if (!active || !pointsRef.current || !materialRef.current) return
     const attribute = pointsRef.current.geometry.getAttribute('position') as THREE.BufferAttribute
     for (let i = 0; i < count; i++) {
-      data.radii[i] -= delta * (0.045 + (i % 7) * 0.004)
+      data.radii[i] -= delta * motionScale * (0.045 + (i % 7) * 0.004)
       if (data.radii[i] < 1.04) data.radii[i] = 1.36
       const radius = data.radii[i]
       data.positions[i * 3] = data.directions[i * 3] * radius
@@ -385,7 +385,7 @@ function SolidPrecipitation({ spec }: { spec: PlanetSpec }) {
   )
 }
 
-function CloudShell({ spec, quality }: { spec: PlanetSpec; quality: number }) {
+function CloudShell({ spec, quality, motionScale }: { spec: PlanetSpec; quality: number; motionScale: number }) {
   const P = usePlanetParams(spec)
   const matRef = useRef<THREE.ShaderMaterial>(null)
   const uniforms = useMemo(
@@ -411,7 +411,7 @@ function CloudShell({ spec, quality }: { spec: PlanetSpec; quality: number }) {
   )
   useFrame(({ clock, camera }) => {
     if (matRef.current) {
-      matRef.current.uniforms.uTime.value = clock.elapsedTime
+      matRef.current.uniforms.uTime.value = clock.elapsedTime * motionScale
       matRef.current.uniforms.uNearFade.value = THREE.MathUtils.smoothstep(
         camera.position.length(),
         1.1,
@@ -516,7 +516,7 @@ function RingSystem({ spec, quality }: { spec: PlanetSpec; quality: number }) {
   )
 }
 
-function Moons({ spec }: { spec: PlanetSpec }) {
+function Moons({ spec, motionScale }: { spec: PlanetSpec; motionScale: number }) {
   const group = useRef<THREE.Group>(null)
   const moons = useMemo(
     () =>
@@ -532,7 +532,7 @@ function Moons({ spec }: { spec: PlanetSpec }) {
   )
   useFrame(({ clock }) => {
     if (!group.current) return
-    const t = clock.elapsedTime
+    const t = clock.elapsedTime * motionScale
     group.current.children.forEach((child, i) => {
       const m = moons[i]
       if (!m) return
@@ -574,6 +574,8 @@ function makeGlowTexture(): THREE.Texture {
 
 function Suns({ spec }: { spec: PlanetSpec }) {
   const glow = useMemo(makeGlowTexture, [])
+  // R3F는 선언적으로 만든 객체만 자동 dispose하므로 직접 만든 CanvasTexture는 수동 해제한다.
+  useEffect(() => () => glow.dispose(), [glow])
   const suns = useMemo(() => {
     const arr = [{ dir: SUN1_DIR, color: starColor(spec, 0), dist: 60, size: 2.6 }]
     if (spec.star.count >= 2) arr.push({ dir: SUN2_DIR, color: starColor(spec, 1), dist: 75, size: 1.8 })
@@ -619,12 +621,20 @@ function Suns({ spec }: { spec: PlanetSpec }) {
   )
 }
 
-export default function PlanetSystem({ spec, quality }: { spec: PlanetSpec; quality: number }) {
+export default function PlanetSystem({
+  spec,
+  quality,
+  motionScale = 1,
+}: {
+  spec: PlanetSpec
+  quality: number
+  motionScale?: number
+}) {
   const P = usePlanetParams(spec)
   const spinRef = useRef<THREE.Group>(null)
 
   useFrame((_, delta) => {
-    if (spinRef.current) spinRef.current.rotation.y += P.rotSpeed * delta
+    if (spinRef.current) spinRef.current.rotation.y += P.rotSpeed * delta * motionScale
   })
 
   return (
@@ -634,12 +644,12 @@ export default function PlanetSystem({ spec, quality }: { spec: PlanetSpec; qual
       <group rotation={[0, 0, P.tiltRad]}>
         <group ref={spinRef}>
           <TerrainPlanet spec={spec} quality={quality} />
-          <SolidPrecipitation spec={spec} />
-          <CloudShell spec={spec} quality={quality} />
+          <SolidPrecipitation spec={spec} motionScale={motionScale} />
+          <CloudShell spec={spec} quality={quality} motionScale={motionScale} />
         </group>
         <AtmosphereShell spec={spec} quality={quality} />
         <RingSystem spec={spec} quality={quality} />
-        <Moons spec={spec} />
+        <Moons spec={spec} motionScale={motionScale} />
       </group>
     </>
   )

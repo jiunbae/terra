@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTerra } from '../store'
 import type { CompatibleImageJobStatus, ImageQuality, PlanetSpec } from '../types'
 
@@ -37,31 +39,47 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
     imageStatus,
     imageQuality,
     setImageQuality,
-    images,
-    generating,
-    imagePhases,
-    imageProgress,
-    imageErrors,
+    image,
+    busy,
+    phase,
+    progress,
+    error,
     generateImage,
-  } = useTerra()
-  const image = images[key]
-  const busy = Boolean(generating[key])
-  const phase = imagePhases[key]
-  const progress = imageProgress[key]
-  const error = imageErrors[key]
+    loadImageStatus,
+  } = useTerra(useShallow((state) => ({
+    imageStatus: state.imageStatus,
+    imageQuality: state.imageQuality,
+    setImageQuality: state.setImageQuality,
+    image: state.images[key],
+    busy: Boolean(state.generating[key]),
+    phase: state.imagePhases[key],
+    progress: state.imageProgress[key],
+    error: state.imageErrors[key],
+    generateImage: state.generateImage,
+    loadImageStatus: state.loadImageStatus,
+  })))
+  const [imageLoadFailed, setImageLoadFailed] = useState(false)
+  useEffect(() => setImageLoadFailed(false), [image?.url])
+
   const notes = verificationNotes(image?.verification_notes)
-  const selectedQuality = QUALITY_OPTIONS.find((option) => option.value === imageQuality)!
+  const activeQuality = progress?.quality ?? imageQuality
+  const selectedQuality = QUALITY_OPTIONS.find((option) => option.value === activeQuality)!
   const candidateText = progress?.candidate_total
     ? `후보 ${progress.candidate_current ?? 1}/${progress.candidate_total}`
     : null
 
-  if (!imageStatus) return <div className="image-status">이미지 생성기 확인 중…</div>
+  if (!imageStatus) return <div className="image-status" role="status">이미지 생성기 확인 중…</div>
 
   return (
-    <div className={`artwork ${image ? 'has-image' : ''}`}>
-      {image ? (
+    <div className={`artwork ${image && !imageLoadFailed ? 'has-image' : ''}`}>
+      {image && !imageLoadFailed ? (
         <>
-          <img src={image.url} alt={alt} />
+          <img
+            src={image.url}
+            alt={alt}
+            decoding="async"
+            onError={() => setImageLoadFailed(true)}
+          />
           <div className="artwork-meta">
             <span>{image.provider} · {image.model}</span>
             <span>seed {image.seed}</span>
@@ -82,7 +100,11 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
       ) : (
         <div className="artwork-placeholder" aria-hidden="true">
           <span>{kind === 'planet' ? '◉' : kind === 'surface' ? '⌁' : '◇'}</span>
-          <small>{kind === 'planet' ? '행성 궤도 이미지' : kind === 'surface' ? '지표 탐사 이미지' : '거주민 환경 초상'}</small>
+          <small>
+            {imageLoadFailed
+              ? '이미지를 표시할 수 없음'
+              : kind === 'planet' ? '행성 궤도 이미지' : kind === 'surface' ? '지표 탐사 이미지' : '거주민 환경 초상'}
+          </small>
         </div>
       )}
 
@@ -91,7 +113,7 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
           <span>생성 품질</span>
           <small>{selectedQuality.description}</small>
         </div>
-        <div className="image-quality-options" role="radiogroup" aria-label="이미지 생성 품질">
+        <div className="image-quality-options" role="radiogroup" aria-label={`${alt} 생성 품질`}>
           {QUALITY_OPTIONS.map((option) => (
             <button
               type="button"
@@ -110,6 +132,7 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
       </div>
 
       <button
+        type="button"
         className="image-generate"
         onClick={() => generateImage(spec, kind, index)}
         disabled={!imageStatus.available || busy}
@@ -119,7 +142,17 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
           ? `${PHASE_LABELS[phase ?? 'requesting']}…`
           : image ? '다른 이미지 생성' : '이미지 생성'}
       </button>
-      {!imageStatus.available && <p className="image-note">{imageStatus.message}</p>}
+      {!imageStatus.available && (
+        <div className="image-note" role="alert">
+          <p>{imageStatus.message}</p>
+          <button type="button" className="inline-retry" onClick={loadImageStatus}>상태 다시 확인</button>
+        </div>
+      )}
+      {imageLoadFailed && (
+        <p className="image-note error-text" role="alert">
+          저장된 이미지를 불러오지 못했습니다. 새 이미지를 생성하거나 잠시 후 다시 시도해 주세요.
+        </p>
+      )}
       {busy && (
         <div className="image-progress" role="status" aria-live="polite">
           <div className="image-progress-head">
@@ -140,7 +173,7 @@ export default function GeneratedArtwork({ spec, kind, index, alt }: Props) {
           </p>
         </div>
       )}
-      {error && <p className="image-note error-text">{error}</p>}
+      {error && <p className="image-note error-text" role="alert">{error}</p>}
     </div>
   )
 }

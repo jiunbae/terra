@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useTerra } from '../store'
 import type { AnalyzeResponse, Inference } from '../types'
 import GeneratedArtwork from './GeneratedArtwork'
@@ -31,19 +32,27 @@ function fmt(n: number, digits = 1): string {
 }
 
 function Meter({ label, value }: { label: string; value: number }) {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100)
   return (
     <div className="meter">
       <span className="meter-label">{label}</span>
-      <div className="meter-track">
-        <div className="meter-fill" style={{ width: `${Math.round(value * 100)}%` }} />
+      <div
+        className="meter-track"
+        role="progressbar"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+      >
+        <div className="meter-fill" style={{ width: `${percent}%` }} />
       </div>
-      <span className="meter-num">{Math.round(value * 100)}%</span>
+      <span className="meter-num">{percent}%</span>
     </div>
   )
 }
 
 function Swatch({ hex, title }: { hex: string; title: string }) {
-  return <span className="swatch" style={{ background: hex }} title={`${title} ${hex}`} />
+  return <span className="swatch" style={{ background: hex }} title={`${title} ${hex}`} role="img" aria-label={`${title} 색상 ${hex}`} />
 }
 
 export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
@@ -51,24 +60,40 @@ export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
   const p = spec.planet
   const s = spec.surface
   const pal = s.palette
-  const { savedPlanetId, savingPlanet, saveError, saveCurrentPlanet } = useTerra()
+  const { savedPlanetId, savingPlanet, saveError, saveCurrentPlanet } = useTerra(
+    useShallow((state) => ({
+      savedPlanetId: state.savedPlanetId,
+      savingPlanet: state.savingPlanet,
+      saveError: state.saveError,
+      saveCurrentPlanet: state.saveCurrentPlanet,
+    })),
+  )
   const [copied, setCopied] = useState(false)
+  const [shareError, setShareError] = useState<string | null>(null)
+  const copiedTimer = useRef<number | null>(null)
   const shareUrl = savedPlanetId
     ? `${window.location.origin}/?planet=${encodeURIComponent(savedPlanetId)}`
     : null
 
+  useEffect(() => () => {
+    if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current)
+  }, [])
+
   const share = async () => {
     if (!shareUrl) return
+    setShareError(null)
     try {
       if (navigator.share) {
         await navigator.share({ title: `${p.name} — TERRA`, url: shareUrl })
       } else {
         await navigator.clipboard.writeText(shareUrl)
         setCopied(true)
-        window.setTimeout(() => setCopied(false), 1800)
+        if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current)
+        copiedTimer.current = window.setTimeout(() => setCopied(false), 1800)
       }
-    } catch {
-      // 사용자가 시스템 공유창을 닫은 경우 상태를 바꾸지 않는다.
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      setShareError('공유 링크를 복사하지 못했습니다. 브라우저 권한을 확인해 주세요.')
     }
   }
 
@@ -79,17 +104,18 @@ export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
         {s.description && <p className="desc">{s.description}</p>}
         <div className="share-actions">
           {!savedPlanetId ? (
-            <button className="archive-save" onClick={saveCurrentPlanet} disabled={savingPlanet}>
+            <button type="button" className="archive-save" onClick={saveCurrentPlanet} disabled={savingPlanet} aria-busy={savingPlanet}>
               {savingPlanet ? '아카이브 저장 중…' : '공개 갤러리에 저장'}
             </button>
           ) : (
             <>
-              <span className="archive-saved">✓ 공개 저장됨</span>
-              <button className="archive-share" onClick={share}>{copied ? '복사됨' : '공유'}</button>
+              <span className="archive-saved" role="status">✓ 공개 저장됨</span>
+              <button type="button" className="archive-share" onClick={share}>{copied ? '복사됨' : '공유'}</button>
             </>
           )}
         </div>
-        {saveError && <p className="image-note error-text">{saveError}</p>}
+        {saveError && <p className="image-note error-text" role="alert">{saveError}</p>}
+        {shareError && <p className="image-note error-text" role="alert">{shareError}</p>}
         <GeneratedArtwork spec={spec} kind="planet" alt={`${p.name} 행성 콘셉트 아트`} />
         <dl>
           <dt>형태</dt>

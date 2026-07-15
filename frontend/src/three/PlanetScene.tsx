@@ -29,7 +29,25 @@ const IDLE_SPEC: PlanetSpec = {
 
 const VIEW_DIST: Record<'orbit' | 'low' | 'north', number> = { orbit: 3.6, low: 1.32, north: 3.1 }
 
-function CameraRig({ onProximityChange }: { onProximityChange: (near: boolean) => void }) {
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const update = () => setMatches(media.matches)
+    update()
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [query])
+  return matches
+}
+
+function CameraRig({
+  onProximityChange,
+  reducedMotion,
+}: {
+  onProximityChange: (near: boolean) => void
+  reducedMotion: boolean
+}) {
   const controlsRef = useRef<OrbitControlsImpl>(null)
   const { camera } = useThree()
   const viewRequest = useTerra((s) => s.viewRequest)
@@ -50,7 +68,8 @@ function CameraRig({ onProximityChange }: { onProximityChange: (near: boolean) =
   useFrame((_, delta) => {
     // 뷰 전환 애니메이션: 현재 시선 방향을 유지한 채 반경만 이동
     if (target.current !== null) {
-      camera.position.lerp(target.current, 1 - Math.exp(-3.2 * delta))
+      if (reducedMotion) camera.position.copy(target.current)
+      else camera.position.lerp(target.current, 1 - Math.exp(-3.2 * delta))
       if (camera.position.distanceTo(target.current) < 0.01) target.current = null
     }
     const dist = camera.position.length()
@@ -86,14 +105,30 @@ export default function PlanetScene() {
   const spec = result?.spec ?? IDLE_SPEC
   const [performanceFactor, setPerformanceFactor] = useState(0.5)
   const [nearSurface, setNearSurface] = useState(false)
+  const [devicePixelRatio, setDevicePixelRatio] = useState(() => window.devicePixelRatio || 1)
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden)
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
   const handleProximityChange = useCallback((near: boolean) => setNearSurface(near), [])
+
+  useEffect(() => {
+    const updatePixelRatio = () => setDevicePixelRatio(window.devicePixelRatio || 1)
+    window.addEventListener('resize', updatePixelRatio, { passive: true })
+    return () => window.removeEventListener('resize', updatePixelRatio)
+  }, [])
+
+  useEffect(() => {
+    const updateVisibility = () => setPageVisible(!document.hidden)
+    document.addEventListener('visibilitychange', updateVisibility)
+    return () => document.removeEventListener('visibilitychange', updateVisibility)
+  }, [])
+
   const profile = useMemo(() => {
     if (renderQuality === 'performance') {
       return { dpr: 0.72, sceneQuality: 0.5, stars: 2200 }
     }
     if (renderQuality === 'quality') {
       return {
-        dpr: Math.min(window.devicePixelRatio || 1, 1.5),
+        dpr: Math.min(devicePixelRatio, 1.5),
         sceneQuality: 1,
         stars: 5000,
       }
@@ -105,15 +140,16 @@ export default function PlanetScene() {
     const adaptiveDpr = 0.72 + performanceFactor * 0.53
     const dprFloor = nearSurface ? 1.0 : 0.72
     return {
-      dpr: Math.min(window.devicePixelRatio || 1, Math.max(dprFloor, adaptiveDpr)),
+      dpr: Math.min(devicePixelRatio, Math.max(dprFloor, adaptiveDpr)),
       sceneQuality,
       stars: sceneQuality < 0.6 ? 2200 : sceneQuality < 0.9 ? 3400 : 5000,
     }
-  }, [nearSurface, performanceFactor, renderQuality])
+  }, [devicePixelRatio, nearSurface, performanceFactor, renderQuality])
 
   return (
     <Canvas
       dpr={profile.dpr}
+      frameloop={pageVisible ? 'always' : 'never'}
       camera={{ fov: 42, near: 0.01, far: 300, position: [0.8, 0.9, 3.6] }}
       gl={{ antialias: profile.dpr <= 1, alpha: false, stencil: false, powerPreference: 'high-performance' }}
       style={{ position: 'absolute', inset: 0 }}
@@ -133,14 +169,15 @@ export default function PlanetScene() {
         factor={3}
         saturation={0.35}
         fade
-        speed={0.2}
+        speed={reducedMotion ? 0 : 0.2}
       />
       <PlanetSystem
         key={spec.planet.name + spec.surface.description}
         spec={spec}
         quality={profile.sceneQuality}
+        motionScale={reducedMotion ? 0 : 1}
       />
-      <CameraRig onProximityChange={handleProximityChange} />
+      <CameraRig onProximityChange={handleProximityChange} reducedMotion={reducedMotion} />
     </Canvas>
   )
 }

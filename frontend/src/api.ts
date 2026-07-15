@@ -14,15 +14,76 @@ const BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '')
 
 async function apiError(res: Response, fallback: string): Promise<Error> {
   const detail = await res.json().catch(() => null)
-  return new Error(detail?.detail ?? `${fallback} (HTTP ${res.status})`)
+  const message = detail?.detail
+  if (typeof message === 'string' && message.trim()) return new Error(message)
+  if (Array.isArray(message)) {
+    const validation = message
+      .map((item) => typeof item?.msg === 'string' ? item.msg : '')
+      .filter(Boolean)
+      .join(', ')
+    if (validation) return new Error(validation)
+  }
+  return new Error(`${fallback} (HTTP ${res.status})`)
 }
 
-export async function analyzeText(text: string): Promise<AnalyzeResponse> {
-  const res = await fetch(`${BASE}/api/analyze`, {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 20_000,
+  timeoutMessage = '서버 응답 시간이 초과되었습니다.',
+): Promise<Response> {
+  const controller = new AbortController()
+  const sourceSignal = init.signal
+  let timedOut = false
+  const forwardAbort = () => controller.abort(sourceSignal?.reason)
+
+  if (sourceSignal?.aborted) forwardAbort()
+  else sourceSignal?.addEventListener('abort', forwardAbort, { once: true })
+
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    // 화면 전환 등 사용자 측 취소와 제한시간이 경합하면 취소를 우선 보존한다.
+    if (sourceSignal?.aborted) throw error
+    if (timedOut) throw new Error(timeoutMessage)
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+    sourceSignal?.removeEventListener('abort', forwardAbort)
+  }
+}
+
+// 취소 가능한 대기 — signal이 abort되면 타이머를 정리하고 즉시 거부한다.
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('이미지 생성이 취소되었습니다.', 'AbortError'))
+      return
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      reject(new DOMException('이미지 생성이 취소되었습니다.', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+export async function analyzeText(text: string, signal?: AbortSignal): Promise<AnalyzeResponse> {
+  const res = await fetchWithTimeout(`${BASE}/api/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
-  })
+    signal,
+  }, 120_000, '행성 분석이 2분을 초과했습니다. 잠시 후 다시 시도해 주세요.')
   if (!res.ok) {
     throw await apiError(res, '분석 실패')
   }
@@ -30,7 +91,12 @@ export async function analyzeText(text: string): Promise<AnalyzeResponse> {
 }
 
 export async function getImageStatus(): Promise<ImageProviderStatus> {
-  const res = await fetch(`${BASE}/api/image/status`)
+  const res = await fetchWithTimeout(
+    `${BASE}/api/image/status`,
+    {},
+    12_000,
+    '이미지 생성기 상태 확인이 지연되고 있습니다.',
+  )
   if (!res.ok) throw await apiError(res, '이미지 생성기 상태 확인 실패')
   return res.json()
 }
@@ -41,45 +107,82 @@ export async function generateArtwork(
   inhabitantIndex?: number,
   quality: ImageQuality = 'balanced',
   onStatus?: (progress: ImageJobProgress) => void,
+  signal?: AbortSignal,
 ): Promise<GeneratedImage> {
-  const res = await fetch(`${BASE}/api/image/generate`, {
+  const res = await fetchWithTimeout(`${BASE}/api/image/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ spec, kind, inhabitant_index: inhabitantIndex, quality }),
-  })
+    signal,
+  }, 30_000, '이미지 생성 작업 등록이 지연되고 있습니다.')
   if (!res.ok) throw await apiError(res, '이미지 생성 요청 실패')
   let job: ImageJob = await res.json()
-  onStatus?.(job)
-  const timeoutMinutes = quality === 'quality' ? 45 : quality === 'balanced' ? 35 : 25
-  const deadline = Date.now() + timeoutMinutes * 60 * 1000
-
-  const activeStatuses: ImageJob['status'][] = [
-    'queued',
-    'running',
-    'generating',
-    'verifying',
-    'refining',
-    'upscaling',
-  ]
-  while (activeStatuses.includes(job.status)) {
-    if (Date.now() >= deadline) throw new Error(`이미지 생성이 ${timeoutMinutes}분을 초과했습니다.`)
-    await new Promise((resolve) => window.setTimeout(resolve, 2500))
-    const statusRes = await fetch(`${BASE}/api/image/jobs/${job.id}`, { cache: 'no-store' })
-    if (!statusRes.ok) throw await apiError(statusRes, '이미지 생성 상태 확인 실패')
-    job = await statusRes.json()
-    onStatus?.(job)
+  let settled = false
+  let cancelRequested = false
+  const requestServerCancel = () => {
+    if (settled || cancelRequested) return
+    cancelRequested = true
+    void fetch(`${BASE}/api/image/jobs/${encodeURIComponent(job.id)}`, {
+      method: 'DELETE',
+      cache: 'no-store',
+      keepalive: true,
+    }).catch(() => undefined)
   }
+  signal?.addEventListener('abort', requestServerCancel, { once: true })
 
-  if (job.status === 'failed') throw new Error(job.error || '이미지 생성에 실패했습니다.')
-  if (!job.url || job.seed === null) throw new Error('이미지 생성 결과가 비어 있습니다.')
-  return {
-    url: assetUrl(job.url),
-    seed: job.seed,
-    provider: job.provider,
-    model: job.model,
-    quality: job.quality ?? quality,
-    quality_score: job.quality_score,
-    verification_notes: job.verification_notes,
+  try {
+    onStatus?.(job)
+    const timeoutMinutes = quality === 'quality' ? 45 : quality === 'balanced' ? 35 : 25
+    const deadline = Date.now() + timeoutMinutes * 60 * 1000
+
+    const activeStatuses: ImageJob['status'][] = [
+      'queued',
+      'running',
+      'generating',
+      'verifying',
+      'refining',
+      'upscaling',
+    ]
+    let consecutivePollFailures = 0
+    while (activeStatuses.includes(job.status)) {
+      if (signal?.aborted) throw new DOMException('이미지 생성이 취소되었습니다.', 'AbortError')
+      if (Date.now() >= deadline) throw new Error(`이미지 생성이 ${timeoutMinutes}분을 초과했습니다.`)
+      await abortableDelay(2500, signal)
+      try {
+        const statusRes = await fetchWithTimeout(
+          `${BASE}/api/image/jobs/${job.id}`,
+          { cache: 'no-store', signal },
+          15_000,
+          '이미지 작업 상태 확인이 지연되고 있습니다.',
+        )
+        if (!statusRes.ok) throw await apiError(statusRes, '이미지 생성 상태 확인 실패')
+        job = await statusRes.json()
+        consecutivePollFailures = 0
+        onStatus?.(job)
+      } catch (error) {
+        if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+        consecutivePollFailures += 1
+        if (consecutivePollFailures >= 3) throw error
+      }
+    }
+
+    if (job.status === 'failed') throw new Error(job.error || '이미지 생성에 실패했습니다.')
+    if (!job.url || job.seed === null) throw new Error('이미지 생성 결과가 비어 있습니다.')
+    settled = true
+    return {
+      url: assetUrl(job.url),
+      seed: job.seed,
+      provider: job.provider,
+      model: job.model,
+      quality: job.quality ?? quality,
+      quality_score: job.quality_score,
+      verification_notes: job.verification_notes,
+    }
+  } catch (error) {
+    requestServerCancel()
+    throw error
+  } finally {
+    signal?.removeEventListener('abort', requestServerCancel)
   }
 }
 
@@ -99,6 +202,7 @@ export function assetPath(url: string): string {
 export async function savePlanet(
   analysis: AnalyzeResponse,
   images: Record<string, GeneratedImage>,
+  signal?: AbortSignal,
 ): Promise<SavedPlanet> {
   const imageAssets = Object.fromEntries(
     Object.entries(images).map(([key, image]) => [
@@ -106,7 +210,7 @@ export async function savePlanet(
       { ...image, url: assetPath(image.url) },
     ]),
   )
-  const res = await fetch(`${BASE}/api/planets`, {
+  const res = await fetchWithTimeout(`${BASE}/api/planets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -115,29 +219,40 @@ export async function savePlanet(
       image_assets: imageAssets,
       public: true,
     }),
-  })
+    signal,
+  }, 30_000, '행성 저장이 지연되고 있습니다.')
   if (!res.ok) throw await apiError(res, '행성 저장 실패')
   return res.json()
 }
 
-export async function getGallery(): Promise<SavedPlanetSummary[]> {
-  const res = await fetch(`${BASE}/api/planets`, { cache: 'no-store' })
+export async function getGallery(signal?: AbortSignal): Promise<SavedPlanetSummary[]> {
+  const res = await fetchWithTimeout(
+    `${BASE}/api/planets`,
+    { cache: 'no-store', signal },
+    20_000,
+    '갤러리 조회가 지연되고 있습니다.',
+  )
   if (!res.ok) throw await apiError(res, '갤러리 조회 실패')
   return res.json()
 }
 
-export async function getSavedPlanet(id: string): Promise<SavedPlanet> {
-  const res = await fetch(`${BASE}/api/planets/${encodeURIComponent(id)}`, { cache: 'no-store' })
+export async function getSavedPlanet(id: string, signal?: AbortSignal): Promise<SavedPlanet> {
+  const res = await fetchWithTimeout(
+    `${BASE}/api/planets/${encodeURIComponent(id)}`,
+    { cache: 'no-store', signal },
+    20_000,
+    '공유 행성 조회가 지연되고 있습니다.',
+  )
   if (!res.ok) throw await apiError(res, '공유 행성 조회 실패')
   return res.json()
 }
 
 export async function updateSavedCover(id: string, editToken: string, url: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/planets/${encodeURIComponent(id)}/cover`, {
+  const res = await fetchWithTimeout(`${BASE}/api/planets/${encodeURIComponent(id)}/cover`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cover_image_url: assetPath(url), edit_token: editToken }),
-  })
+  }, 20_000, '대표 이미지 연결이 지연되고 있습니다.')
   if (!res.ok) throw await apiError(res, '대표 이미지 연결 실패')
 }
 
@@ -146,8 +261,9 @@ export async function updateSavedImage(
   editToken: string,
   key: string,
   image: GeneratedImage,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/planets/${encodeURIComponent(id)}/images`, {
+  const res = await fetchWithTimeout(`${BASE}/api/planets/${encodeURIComponent(id)}/images`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -155,7 +271,8 @@ export async function updateSavedImage(
       image: { ...image, url: assetPath(image.url) },
       edit_token: editToken,
     }),
-  })
+    signal,
+  }, 20_000, '생성 이미지 연결이 지연되고 있습니다.')
   if (!res.ok) throw await apiError(res, '생성 이미지 연결 실패')
 }
 

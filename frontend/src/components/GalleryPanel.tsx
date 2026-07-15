@@ -1,4 +1,5 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { assetUrl } from '../api'
 import { useTerra } from '../store'
 
@@ -14,15 +15,31 @@ const FEATURE_KO: Record<string, string> = {
 }
 
 export default function GalleryPanel({ onOpen }: { onOpen: () => void }) {
-  const { gallery, galleryLoading, galleryError, loadGallery, openSavedPlanet } = useTerra()
+  const { gallery, galleryLoading, galleryError, openError, loadGallery, openSavedPlanet } = useTerra(
+    useShallow((state) => ({
+      gallery: state.gallery,
+      galleryLoading: state.galleryLoading,
+      galleryError: state.galleryError,
+      openError: state.error,
+      loadGallery: state.loadGallery,
+      openSavedPlanet: state.openSavedPlanet,
+    })),
+  )
+  const [openingId, setOpeningId] = useState<string | null>(null)
 
   useEffect(() => {
-    loadGallery()
+    const controller = new AbortController()
+    loadGallery(controller.signal)
+    return () => controller.abort()
   }, [loadGallery])
 
   const open = async (id: string) => {
-    await openSavedPlanet(id)
-    onOpen()
+    setOpeningId(id)
+    if (await openSavedPlanet(id)) {
+      onOpen()
+      return
+    }
+    setOpeningId(null)
   }
 
   return (
@@ -32,13 +49,21 @@ export default function GalleryPanel({ onOpen }: { onOpen: () => void }) {
           <h2>행성 아카이브</h2>
           <p className="hint">공개 저장된 행성을 다시 열고 공유할 수 있습니다.</p>
         </div>
-        <button className="ghost gallery-refresh" onClick={loadGallery} disabled={galleryLoading}>
+        <button
+          type="button"
+          className="ghost gallery-refresh"
+          onClick={() => loadGallery()}
+          disabled={galleryLoading}
+          aria-label="행성 갤러리 새로고침"
+          title="새로고침"
+        >
           ↻
         </button>
       </div>
 
-      {galleryLoading && gallery.length === 0 && <p className="hint">아카이브 수신 중…</p>}
-      {galleryError && <div className="error">⚠ {galleryError}</div>}
+      {galleryLoading && gallery.length === 0 && <p className="hint" role="status">아카이브 수신 중…</p>}
+      {galleryError && <div className="error" role="alert">⚠ {galleryError}</div>}
+      {openError && <div className="error" role="alert">⚠ {openError}</div>}
       {!galleryLoading && gallery.length === 0 && (
         <div className="gallery-empty">
           <span>◎</span>
@@ -48,11 +73,23 @@ export default function GalleryPanel({ onOpen }: { onOpen: () => void }) {
 
       <div className="gallery-grid">
         {gallery.map((planet) => (
-          <button className="gallery-card" key={planet.id} onClick={() => open(planet.id)}>
+          <button
+            type="button"
+            className="gallery-card"
+            key={planet.id}
+            onClick={() => open(planet.id)}
+            disabled={openingId !== null}
+            aria-busy={openingId === planet.id}
+          >
             {planet.cover_image_url ? (
-              <img src={assetUrl(planet.cover_image_url)} alt={`${planet.name} 대표 이미지`} loading="lazy" />
+              <img
+                src={assetUrl(planet.cover_image_url)}
+                alt={`${planet.name} 대표 이미지`}
+                loading="lazy"
+                decoding="async"
+              />
             ) : (
-              <div className="gallery-planet-placeholder"><span>◉</span></div>
+              <div className="gallery-planet-placeholder" aria-hidden="true"><span>◉</span></div>
             )}
             <div className="gallery-card-body">
               <strong>{planet.name}</strong>

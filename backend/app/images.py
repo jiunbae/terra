@@ -274,6 +274,97 @@ def build_negative_prompt(
 
 
 _generation_lock = asyncio.Lock()
+_guide_lock = asyncio.Lock()
+
+_SUBPROCESS_ENV_NAMES = {
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PYTHONUTF8",
+    "PYTHONUNBUFFERED",
+    "XDG_CACHE_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "TOKENIZERS_PARALLELISM",
+    "DYLD_LIBRARY_PATH",
+}
+_SUBPROCESS_ENV_PREFIXES = ("HF_", "HUGGINGFACE_", "MLX_", "METAL_")
+
+
+def image_subprocess_environment() -> dict[str, str]:
+    """Return the minimum environment needed by local image executables.
+
+    The API process also holds Gemini and optional vault credentials. They must
+    never be inherited by MFLUX, model dependencies, or an external upscaler.
+    """
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SUBPROCESS_ENV_NAMES or key.startswith(_SUBPROCESS_ENV_PREFIXES)
+    }
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _bounded_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+async def _stop_process(
+    process: asyncio.subprocess.Process | None,
+    *,
+    graceful: bool,
+) -> None:
+    """Reap a child process, escalating from TERM to KILL on cancellation."""
+    if process is None or process.returncode is not None:
+        return
+    try:
+        if graceful:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+                return
+            except TimeoutError:
+                pass
+        process.kill()
+    except ProcessLookupError:
+        return
+    await process.wait()
+
+
+async def _create_guide(spec: PlanetSpec, path: Path, seed: int) -> None:
+    """Serialize CPU-heavy guide work and let its thread finish before cleanup."""
+    async with _guide_lock:
+        task = asyncio.create_task(asyncio.to_thread(create_planet_guide, spec, path, seed=seed))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # asyncio.to_thread cannot stop its worker. Waiting here prevents the worker
+            # from recreating a guide after the caller's finally block removed it.
+            await task
+            raise
 
 
 async def generate_image(
@@ -320,16 +411,23 @@ async def generate_candidate_batch(
         raise ImageGenerationError("이미지 후보 seed가 비어 있습니다.")
     if len(seeds) > 4:
         raise ImageGenerationError("한 작업에서 생성할 수 있는 후보는 최대 4장입니다.")
+    if len(set(seeds)) != len(seeds):
+        raise ImageGenerationError("이미지 후보 seed는 서로 달라야 합니다.")
 
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     default_width, default_height = (896, 1152) if kind == "inhabitant" else (1344, 896)
-    actual_width = width or int(os.environ.get(f"TERRA_IMAGE_{kind.upper()}_WIDTH", str(default_width)))
-    actual_height = height or int(os.environ.get(f"TERRA_IMAGE_{kind.upper()}_HEIGHT", str(default_height)))
+    actual_width = width if width is not None else _bounded_env_int(
+        f"TERRA_IMAGE_{kind.upper()}_WIDTH", default_width, 512, 2048
+    )
+    actual_height = height if height is not None else _bounded_env_int(
+        f"TERRA_IMAGE_{kind.upper()}_HEIGHT", default_height, 512, 2048
+    )
     actual_width = max(512, min(2048, actual_width - actual_width % 32))
     actual_height = max(512, min(2048, actual_height - actual_height % 32))
-    actual_steps = steps or int(os.environ.get("TERRA_IMAGE_STEPS", "9"))
+    actual_steps = steps if steps is not None else _bounded_env_int("TERRA_IMAGE_STEPS", 9, 1, 100)
+    actual_steps = max(1, min(100, actual_steps))
     quantize = os.environ.get("TERRA_IMAGE_QUANTIZE", "0").strip().lower()
-    timeout = int(os.environ.get("TERRA_IMAGE_TIMEOUT", "1200"))
+    timeout = _bounded_env_int("TERRA_IMAGE_TIMEOUT", 1200, 30, 3600)
     token = secrets.token_hex(8)
     output_template = GENERATED_DIR / f"{kind}-{token}-{{seed}}.png"
     outputs = [GENERATED_DIR / f"{kind}-{token}-{seed}.png" for seed in seeds]
@@ -354,54 +452,63 @@ async def generate_candidate_batch(
     ]
     if negative_prompt:
         args.extend(["--negative-prompt", negative_prompt])
-    conditioning_path = init_image_path
-    if conditioning_path is None and kind == "planet" and spec is not None and use_planet_guide:
-        guide_path = GENERATED_DIR / ".guides" / f"planet-{secrets.token_hex(8)}.ppm"
-        create_planet_guide(spec, guide_path, seed=seeds[0])
-        conditioning_path = guide_path
-        guide_strength = float(os.environ.get("TERRA_PLANET_GUIDE_STRENGTH", "0.52"))
-        guide_strength = max(0.15, min(0.75, guide_strength))
-        image_strength = guide_strength
-    if conditioning_path is not None:
-        strength = max(0.05, min(0.9, image_strength if image_strength is not None else 0.62))
-        args.extend(["--image-path", str(conditioning_path), "--image-strength", str(strength)])
-    guidance = os.environ.get("TERRA_IMAGE_GUIDANCE", "").strip()
-    if guidance:
-        args.extend(["--guidance", guidance])
-    if quantize not in {"", "0", "none", "false"}:
-        args.extend(["--quantize", quantize])
-
-    # MLX 모델을 동시에 여러 개 올리면 통합 메모리가 급증하므로 직렬화한다.
-    async with _generation_lock:
-        if on_started is not None:
-            await on_started()
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+    process: asyncio.subprocess.Process | None = None
+    succeeded = False
+    try:
+        conditioning_path = init_image_path
+        if conditioning_path is None and kind == "planet" and spec is not None and use_planet_guide:
+            guide_path = GENERATED_DIR / ".guides" / f"planet-{secrets.token_hex(8)}.ppm"
+            # 픽셀별 가우시안 합산이라 CPU 집약적이다. event loop을 막지 않고,
+            # 여러 대기 작업이 동시에 CPU를 점유하지 않도록 별도 직렬화한다.
+            await _create_guide(spec, guide_path, seeds[0])
+            conditioning_path = guide_path
+            image_strength = _bounded_env_float(
+                "TERRA_PLANET_GUIDE_STRENGTH", 0.52, 0.15, 0.75
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError as exc:
-            if "process" in locals():
-                process.kill()
-                await process.wait()
-            raise ImageGenerationError(f"이미지 생성 시간이 {timeout}초를 초과했습니다.") from exc
-        except asyncio.CancelledError:
-            if "process" in locals() and process.returncode is None:
-                process.terminate()
-                await process.wait()
-            raise
-        except OSError as exc:
-            raise ImageGenerationError(f"이미지 생성기를 시작하지 못했습니다: {exc}") from exc
-        finally:
-            if guide_path is not None:
-                guide_path.unlink(missing_ok=True)
+        if conditioning_path is not None:
+            strength = max(0.05, min(0.9, image_strength if image_strength is not None else 0.62))
+            args.extend(["--image-path", str(conditioning_path), "--image-strength", str(strength)])
+        guidance = os.environ.get("TERRA_IMAGE_GUIDANCE", "").strip()
+        if guidance:
+            args.extend(["--guidance", guidance])
+        if quantize not in {"", "0", "none", "false"}:
+            args.extend(["--quantize", quantize])
 
-    if process.returncode != 0:
-        detail = (stderr or stdout).decode("utf-8", errors="replace")[-1200:]
-        raise ImageGenerationError(f"mflux 생성 실패: {detail or f'exit {process.returncode}'}")
-    missing = [output.name for output in outputs if not output.is_file()]
-    if missing:
-        raise ImageGenerationError(f"mflux가 완료되었지만 출력 이미지를 찾을 수 없습니다: {', '.join(missing)}")
-    return [(f"/generated/{output.name}", seed) for output, seed in zip(outputs, seeds)]
+        # MLX 모델을 동시에 여러 개 올리면 통합 메모리가 급증하므로 직렬화한다.
+        async with _generation_lock:
+            if on_started is not None:
+                await on_started()
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=image_subprocess_environment(),
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except TimeoutError as exc:
+                await _stop_process(process, graceful=False)
+                raise ImageGenerationError(f"이미지 생성 시간이 {timeout}초를 초과했습니다.") from exc
+            except asyncio.CancelledError:
+                await asyncio.shield(_stop_process(process, graceful=True))
+                raise
+            except OSError as exc:
+                raise ImageGenerationError(f"이미지 생성기를 시작하지 못했습니다: {exc}") from exc
+
+        if process.returncode != 0:
+            # 도구 stderr가 실행 인자(사용자 프롬프트)를 되비출 수 있으므로 예외와
+            # 서버 로그에는 본문을 보존하지 않고 종료 코드만 남긴다.
+            raise ImageGenerationError(f"mflux 생성 실패 (exit {process.returncode})")
+        missing = [output.name for output in outputs if not output.is_file()]
+        if missing:
+            raise ImageGenerationError(
+                f"mflux가 완료되었지만 출력 이미지를 찾을 수 없습니다: {', '.join(missing)}"
+            )
+        succeeded = True
+        return [(f"/generated/{output.name}", seed) for output, seed in zip(outputs, seeds)]
+    finally:
+        if guide_path is not None:
+            _unlink_quietly(guide_path)
+        if not succeeded:
+            for output in set(outputs):
+                _unlink_quietly(output)

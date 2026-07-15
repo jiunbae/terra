@@ -5,13 +5,17 @@ from __future__ import annotations
 import logging
 import asyncio
 import os
+import re
+import shutil
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .derive import derive_physics
 from .gemini import MODEL, GeminiError, generate_json
@@ -23,16 +27,19 @@ from .images import (
     build_surface_prompt,
     provider_status,
 )
-from .image_jobs import image_jobs
+from .image_jobs import ImageQueueFull, ImageStorageFull, image_jobs
+from .http_security import ContentLengthLimitMiddleware, ProductionHeadersMiddleware
+from .maintenance import cleanup_generated_images
 from .rate_limit import RateLimiter
 from .repository import (
     get_planet,
+    healthcheck_database,
     list_public_planets,
     save_planet,
     update_cover,
     update_image_asset,
 )
-from .schema import GEMINI_SCHEMA, PlanetSpec
+from .schema import GEMINI_SCHEMA, PlanetSpec, ShortText
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("terra")
@@ -40,13 +47,84 @@ log = logging.getLogger("terra")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-app = FastAPI(title="Terra API")
+ENVIRONMENT = os.environ.get("TERRA_ENV", "development").strip().lower()
+PUBLIC_DOCS = ENVIRONMENT != "production"
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    initial_cleanup = await asyncio.to_thread(cleanup_generated_images)
+    if initial_cleanup.aborted or initial_cleanup.errors:
+        log.warning("generated asset cleanup incomplete: %s", initial_cleanup.to_dict())
+    else:
+        log.info("generated asset cleanup: %s", initial_cleanup.to_dict())
+    maintenance_task = asyncio.create_task(_generated_cleanup_loop())
+    try:
+        yield
+    finally:
+        maintenance_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await maintenance_task
+        # 배포/종료 중 MLX·업스케일러 자식 프로세스가 고아로 남지 않게 한다.
+        await image_jobs.shutdown()
+
+
+async def _generated_cleanup_loop() -> None:
+    try:
+        interval_hours = float(os.environ.get("TERRA_GENERATED_CLEANUP_INTERVAL_HOURS", "6"))
+    except ValueError:
+        interval_hours = 6.0
+    interval_seconds = max(3600.0, min(7 * 86400.0, interval_hours * 3600.0))
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            result = await asyncio.to_thread(cleanup_generated_images)
+        except Exception:
+            log.exception("unexpected generated asset cleanup failure")
+            continue
+        if result.aborted or result.errors or not result.limits_satisfied:
+            log.warning("generated asset cleanup incomplete: %s", result.to_dict())
+        elif result.deleted_count:
+            log.info("generated asset cleanup: %s", result.to_dict())
+
+
+app = FastAPI(
+    title="Terra API",
+    docs_url="/docs" if PUBLIC_DOCS else None,
+    redoc_url="/redoc" if PUBLIC_DOCS else None,
+    openapi_url="/openapi.json" if PUBLIC_DOCS else None,
+    lifespan=lifespan,
+)
+allowed_hosts = [
+    host.strip()
+    for host in os.environ.get(
+        "TERRA_ALLOWED_HOSTS",
+        "terra.jiun.dev,localhost,127.0.0.1,testserver",
+    ).split(",")
+    if host.strip()
+]
+# Starlette는 마지막에 추가한 middleware가 가장 바깥쪽이다. CORS preflight를
+# 포함한 모든 응답에 보안 헤더가 붙도록 CORS부터 안쪽에 등록한다.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.environ.get(
+            "TERRA_CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+app.add_middleware(
+    ContentLengthLimitMiddleware,
+    max_bytes=int(os.environ.get("TERRA_MAX_REQUEST_BYTES", str(1024 * 1024))),
+)
+app.add_middleware(ProductionHeadersMiddleware)
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=GENERATED_DIR), name="generated")
 
@@ -153,16 +231,18 @@ class SavedImageAsset(BaseModel):
     model: str = Field(default="unknown", max_length=200)
     quality: Literal["fast", "balanced", "quality"] | None = None
     quality_score: int | None = Field(default=None, ge=0, le=100)
-    verification_notes: list[str] = Field(default_factory=list)
+    verification_notes: list[ShortText] = Field(default_factory=list, max_length=8)
 
 
 class SavePlanetRequest(BaseModel):
     spec: PlanetSpec
-    physics: dict[str, Any]
+    physics: dict[str, Any] = Field(max_length=64)
     model: str = Field(max_length=200)
     cover_image_url: str | None = Field(default=None, max_length=500)
-    image_assets: dict[str, SavedImageAsset] = Field(default_factory=dict)
-    public: bool = True
+    image_assets: dict[str, SavedImageAsset] = Field(default_factory=dict, max_length=18)
+    # 현재 제품의 저장 동작은 공개 갤러리 공유다. 소유자 인증이 없는 상태에서
+    # private처럼 보이지만 URL로 읽히는 레코드를 만들지 않는다.
+    public: Literal[True] = True
 
 
 class UpdateImageAssetRequest(BaseModel):
@@ -179,16 +259,18 @@ class UpdateCoverRequest(BaseModel):
 def _safe_cover_url(value: str | None) -> str | None:
     if value is None:
         return None
-    if not value.startswith("/generated/") or ".." in value or "?" in value or "#" in value:
+    if not re.fullmatch(r"/generated/[A-Za-z0-9][A-Za-z0-9._-]*\.png", value):
         raise HTTPException(status_code=422, detail="대표 이미지는 Terra 생성 이미지여야 합니다.")
     return value
 
 
-def _safe_image_key(value: str) -> str:
+def _safe_image_key(value: str, *, inhabitant_count: int | None = None) -> str:
     if value in {"planet", "surface"}:
         return value
     if value.startswith("inhabitant:") and value[11:].isdigit():
-        return value
+        index = int(value[11:])
+        if inhabitant_count is None or index < inhabitant_count:
+            return value
     raise HTTPException(status_code=422, detail="올바르지 않은 이미지 자산 키입니다.")
 
 
@@ -201,6 +283,50 @@ def _safe_image_asset(value: SavedImageAsset) -> dict[str, Any]:
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "model": MODEL}
+
+
+@app.get("/api/livez", include_in_schema=False)
+async def liveness() -> dict[str, str]:
+    """Process-level probe; dependencies are intentionally checked by /readyz."""
+    return {"status": "ok"}
+
+
+@app.get("/api/readyz", include_in_schema=False)
+async def readiness(response: Response) -> dict[str, Any]:
+    """Deployment probe with safe, non-secret dependency diagnostics."""
+    database_ready, queue = await asyncio.gather(
+        asyncio.to_thread(healthcheck_database),
+        image_jobs.stats(),
+    )
+    key_ready = bool(
+        (os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY", "")).strip()
+    )
+    try:
+        minimum_free_mb = max(128, int(os.environ.get("TERRA_MIN_FREE_DISK_MB", "2048")))
+    except ValueError:
+        minimum_free_mb = 2048
+    try:
+        free_disk_mb = shutil.disk_usage(GENERATED_DIR).free // (1024 * 1024)
+    except OSError:
+        free_disk_mb = 0
+    disk_ready = free_disk_mb >= minimum_free_mb
+    frontend_ready = ENVIRONMENT != "production" or FRONTEND_DIST.is_dir()
+    image_provider = provider_status()
+    ready = database_ready and key_ready and disk_ready and frontend_ready
+    response.status_code = 200 if ready else 503
+    return {
+        "status": "ready" if ready else "not_ready",
+        "checks": {
+            "database": database_ready,
+            "analysis_provider": key_ready,
+            "storage": disk_ready,
+            "frontend": frontend_ready,
+            # 이미지 생성기는 선택 기능이므로 readiness를 막지 않고 degraded로 표시한다.
+            "image_provider": image_provider.available,
+        },
+        "queue": queue,
+        "free_disk_mb": free_disk_mb,
+    }
 
 
 @app.get("/api/image/status")
@@ -226,7 +352,10 @@ async def analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse:
             )
     except GeminiError as e:
         log.error("분석 실패: %s", e)
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        raise HTTPException(
+            status_code=502,
+            detail="행성 분석 서비스에 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from e
 
     # Pydantic이 범위를 벗어난 값은 거부하므로, 실패 시 원인 필드를 알려준다
     try:
@@ -255,15 +384,24 @@ async def create_image(req: ImageRequest, request: Request) -> dict[str, Any]:
         prompt = build_inhabitant_prompt(req.spec, inhabitant)
         negative_prompt = build_negative_prompt("inhabitant", req.spec, inhabitant)
 
-    job = await image_jobs.create(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        spec=req.spec,
-        kind=req.kind,
-        seed=req.seed,
-        quality=req.quality,
-        inhabitant_index=req.inhabitant_index,
-    )
+    try:
+        job = await image_jobs.create(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            spec=req.spec,
+            kind=req.kind,
+            seed=req.seed,
+            quality=req.quality,
+            inhabitant_index=req.inhabitant_index,
+        )
+    except ImageQueueFull as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+    except ImageStorageFull as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
     return job.public()
 
 
@@ -275,11 +413,19 @@ async def get_image_job(job_id: str) -> dict[str, Any]:
     return job.public()
 
 
+@app.delete("/api/image/jobs/{job_id}", response_model=ImageJobResponse)
+async def cancel_image_job(job_id: str) -> dict[str, Any]:
+    job = await image_jobs.cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="이미지 생성 작업을 찾을 수 없습니다.")
+    return job.public()
+
+
 @app.post("/api/planets", status_code=201)
 async def create_saved_planet(req: SavePlanetRequest, request: Request) -> dict[str, Any]:
     await save_limiter.check(request)
     image_assets = {
-        _safe_image_key(key): _safe_image_asset(asset)
+        _safe_image_key(key, inhabitant_count=len(req.spec.inhabitants)): _safe_image_asset(asset)
         for key, asset in req.image_assets.items()
     }
     cover_image_url = _safe_cover_url(req.cover_image_url)
@@ -288,8 +434,9 @@ async def create_saved_planet(req: SavePlanetRequest, request: Request) -> dict[
     return await asyncio.to_thread(
         save_planet,
         spec=req.spec,
-        physics=req.physics,
-        model=req.model,
+        # 공개 영구 데이터는 클라이언트가 제출한 파생값을 신뢰하지 않는다.
+        physics=derive_physics(req.spec),
+        model=MODEL,
         cover_image_url=cover_image_url,
         is_public=req.public,
         image_assets=image_assets,
@@ -306,14 +453,19 @@ async def gallery(
 
 @app.get("/api/planets/{planet_id}")
 async def saved_planet(planet_id: str) -> dict[str, Any]:
-    planet = await asyncio.to_thread(get_planet, planet_id)
+    planet = await asyncio.to_thread(get_planet, planet_id, public_only=True)
     if planet is None:
         raise HTTPException(status_code=404, detail="저장된 행성을 찾을 수 없습니다.")
     return planet
 
 
 @app.patch("/api/planets/{planet_id}/cover")
-async def update_saved_planet_cover(planet_id: str, req: UpdateCoverRequest) -> dict[str, Any]:
+async def update_saved_planet_cover(
+    planet_id: str,
+    req: UpdateCoverRequest,
+    request: Request,
+) -> dict[str, Any]:
+    await save_limiter.check(request)
     try:
         planet = await asyncio.to_thread(
             update_cover,
@@ -332,12 +484,18 @@ async def update_saved_planet_cover(planet_id: str, req: UpdateCoverRequest) -> 
 async def update_saved_planet_image(
     planet_id: str,
     req: UpdateImageAssetRequest,
+    request: Request,
 ) -> dict[str, Any]:
+    await save_limiter.check(request)
+    existing = await asyncio.to_thread(get_planet, planet_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="저장된 행성을 찾을 수 없습니다.")
+    inhabitant_count = len(existing.get("spec", {}).get("inhabitants", []))
     try:
         planet = await asyncio.to_thread(
             update_image_asset,
             planet_id,
-            _safe_image_key(req.key),
+            _safe_image_key(req.key, inhabitant_count=inhabitant_count),
             _safe_image_asset(req.image),
             req.edit_token,
         )
@@ -363,6 +521,5 @@ def _lenient_parse(raw: dict[str, Any]) -> PlanetSpec:
 
 
 # 프로덕션 빌드가 있으면 FastAPI가 SPA도 함께 서비스한다. API 라우트보다 반드시 뒤에 둔다.
-FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if FRONTEND_DIST.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.image_jobs import ImageJobManager
 from app.image_verifier import CriterionScores, ImageVerificationResult
+from app.images import ImageGenerationError
 from app.schema import Inhabitant, PlanetSpec
 
 
@@ -103,6 +104,30 @@ class ImageJobPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((self.generated / Path(job.url or "").name).is_file())
         self.assertEqual(len(list(self.generated.glob("*.png"))), 1)
 
+    async def test_balanced_mode_survives_verifier_transport_failure(self) -> None:
+        manager = ImageJobManager()
+        batch = self._batch()
+        verifier = AsyncMock(side_effect=RuntimeError("vision unavailable"))
+        with (
+            patch("app.image_jobs.GENERATED_DIR", self.generated),
+            patch("app.image_jobs.generate_candidate_batch", batch),
+            patch("app.image_jobs.verify_generated_image", new=verifier),
+        ):
+            job = await manager.create(
+                prompt="test",
+                negative_prompt="",
+                spec=self.spec,
+                kind="surface",
+                seed=21,
+                quality="balanced",
+            )
+            await self._wait(manager)
+
+        self.assertEqual(job.status, "completed")
+        self.assertIsNone(job.quality_score)
+        self.assertTrue(any("검수를 사용할 수 없어" in note for note in job.verification_notes))
+        self.assertEqual(len(list(self.generated.glob("*.png"))), 1)
+
     async def test_quality_mode_refines_winner_at_final_dimensions(self) -> None:
         manager = ImageJobManager()
         self.spec.inhabitants = [Inhabitant(name="테스트 거주민")]
@@ -135,6 +160,69 @@ class ImageJobPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((refinement["width"], refinement["height"]), (1024, 1344))
         self.assertIsNotNone(refinement["init_image_path"])
         self.assertEqual(len(list(self.generated.glob("*.png"))), 1)
+
+    async def test_quality_mode_keeps_verified_winner_when_refinement_regresses(self) -> None:
+        manager = ImageJobManager()
+        batch = self._batch()
+        verifier = AsyncMock(
+            side_effect=[_verification(70), _verification(91), _verification(80), _verification(60)]
+        )
+        with (
+            patch("app.image_jobs.GENERATED_DIR", self.generated),
+            patch("app.image_jobs.generate_candidate_batch", batch),
+            patch("app.image_jobs.verify_generated_image", new=verifier),
+            patch("app.image_jobs.build_upscaler_command", return_value=None),
+        ):
+            job = await manager.create(
+                prompt="test",
+                negative_prompt="",
+                spec=self.spec,
+                kind="surface",
+                seed=31,
+                quality="quality",
+            )
+            await self._wait(manager)
+
+        candidate_seeds = batch.await_args_list[0].kwargs["seeds"]
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.quality_score, 91)
+        self.assertEqual(job.actual_seed, candidate_seeds[1])
+        self.assertTrue(any("원본 후보" in note for note in job.verification_notes))
+        self.assertEqual(len(list(self.generated.glob("*.png"))), 1)
+
+    async def test_quality_mode_survives_optional_refinement_failure(self) -> None:
+        manager = ImageJobManager()
+        first_batch = self._batch()
+        calls = 0
+
+        async def generate(*args: object, **kwargs: object) -> list[tuple[str, int]]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return await first_batch(*args, **kwargs)
+            raise ImageGenerationError("refine failed")
+
+        batch = AsyncMock(side_effect=generate)
+        verifier = AsyncMock(side_effect=[_verification(70), _verification(91), _verification(80)])
+        with (
+            patch("app.image_jobs.GENERATED_DIR", self.generated),
+            patch("app.image_jobs.generate_candidate_batch", batch),
+            patch("app.image_jobs.verify_generated_image", new=verifier),
+            patch("app.image_jobs.build_upscaler_command", return_value=None),
+        ):
+            job = await manager.create(
+                prompt="test",
+                negative_prompt="",
+                spec=self.spec,
+                kind="surface",
+                seed=32,
+                quality="quality",
+            )
+            await self._wait(manager)
+
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.quality_score, 91)
+        self.assertTrue(any("보정에 실패" in note for note in job.verification_notes))
 
 
 if __name__ == "__main__":

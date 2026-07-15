@@ -20,11 +20,24 @@ if [[ -z "${GEMINI_API_KEYS:-}" && -z "${GEMINI_API_KEY:-}" ]] && command -v vau
   export GEMINI_API_KEYS
 fi
 
+# Vault 세션은 Gemini 키를 읽는 순간에만 필요하다. API와 이미지 자식 프로세스에 넘기지 않는다.
+unset BW_SESSION
+
 if [[ "$MODE" == "--production" ]]; then
-  cd "$ROOT/frontend"
-  npm run build
+  export TERRA_ENV="${TERRA_ENV:-production}"
+  "$ROOT/scripts/build_frontend_atomic.sh"
   cd "$ROOT/backend"
-  exec uv run uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8787}"
+  # 이미지 작업 큐와 MLX 모델 잠금은 프로세스 내부 상태이므로 반드시 단일 worker로 실행한다.
+  exec uv run uvicorn app.main:app \
+    --host "${TERRA_HOST:-127.0.0.1}" \
+    --port "${PORT:-8787}" \
+    --workers 1 \
+    --no-server-header \
+    --forwarded-allow-ips "${TERRA_FORWARDED_ALLOW_IPS:-127.0.0.1}" \
+    --limit-concurrency "${TERRA_HTTP_CONCURRENCY:-128}" \
+    --backlog "${TERRA_HTTP_BACKLOG:-128}" \
+    --timeout-keep-alive 5 \
+    --timeout-graceful-shutdown "${TERRA_GRACEFUL_SHUTDOWN_SECONDS:-30}"
 fi
 
 cleanup() {

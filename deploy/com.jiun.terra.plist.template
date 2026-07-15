@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jiun.terra</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__TERRA_ROOT__/start.sh</string>
+    <string>--production</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__TERRA_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>TERRA_ENV</key>
+    <string>production</string>
+    <key>TERRA_HOST</key>
+    <string>127.0.0.1</string>
+    <key>PORT</key>
+    <string>8787</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>45</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/terra.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/terra.stderr.log</string>
+</dict>
+</plist>

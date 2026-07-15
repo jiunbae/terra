@@ -3,6 +3,7 @@
 !.env.example
 .DS_Store
 .context/
+backups/
 backend/.venv/
 backend/generated/*
 !backend/generated/.gitkeep
@@ -15,6 +16,8 @@ __pycache__/
 htmlcov/
 frontend/node_modules/
 frontend/dist/
+frontend/dist.next/
+frontend/dist.previous/
 .idea/
 .vscode/
 *.log

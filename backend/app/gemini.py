@@ -11,7 +11,6 @@ import itertools
 import json
 import logging
 import os
-
 from typing import Any
 
 import httpx
@@ -21,7 +20,9 @@ log = logging.getLogger("terra.gemini")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-_ROTATE_STATUS = {429, 500, 503}
+# 429(쿼터)·5xx(일시 오류)뿐 아니라 401/403(키 만료·권한 없음)도 다음 키로 넘긴다.
+# 하나의 죽은 키가 전체 요청을 중단시키지 않도록 한다. 400은 요청 자체 오류이므로 로테이션하지 않는다.
+_ROTATE_STATUS = {401, 403, 408, 429, 500, 502, 503, 504}
 
 
 class GeminiError(Exception):
@@ -30,7 +31,8 @@ class GeminiError(Exception):
 
 def _load_keys() -> list[str]:
     raw = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY", "")
-    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    # 중복 키는 실제 장애 시 같은 요청을 반복할 뿐이므로 순서를 보존해 제거한다.
+    keys = list(dict.fromkeys(k.strip() for k in raw.split(",") if k.strip()))
     if not keys:
         msg = ("Gemini API 키가 비어 있습니다. `.env`에 GEMINI_API_KEYS를 설정하거나 "
                "키 저장소가 연결된 환경에서 start.sh로 실행하세요.")
@@ -39,13 +41,25 @@ def _load_keys() -> list[str]:
 
 
 _key_cycle: itertools.cycle[str] | None = None
+_key_snapshot: tuple[str, ...] = ()
 
 
 def _next_key() -> str:
-    global _key_cycle
-    if _key_cycle is None:
-        _key_cycle = itertools.cycle(_load_keys())
+    global _key_cycle, _key_snapshot
+    keys = tuple(_load_keys())
+    # 테스트/운영 중 키 저장소가 갱신되면 프로세스 재시작 없이 새 목록을 쓴다.
+    if _key_cycle is None or keys != _key_snapshot:
+        _key_snapshot = keys
+        _key_cycle = itertools.cycle(keys)
     return next(_key_cycle)
+
+
+def _retry_delay() -> float:
+    try:
+        value = float(os.environ.get("TERRA_GEMINI_RETRY_DELAY", "2"))
+    except ValueError:
+        return 2.0
+    return max(0.0, min(10.0, value))
 
 
 async def generate_json(
@@ -69,7 +83,8 @@ async def generate_json(
     }
 
     last_err: str = ""
-    async with httpx.AsyncClient(timeout=120) as client:
+    timeout = httpx.Timeout(120, connect=15)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         # 키당 최대 2바퀴 시도
         for attempt in range(n_keys * 2):
             key = _next_key()
@@ -82,27 +97,45 @@ async def generate_json(
             except httpx.HTTPError as e:
                 last_err = f"network: {e}"
                 log.warning("Gemini 네트워크 오류, 다음 키로 로테이션: %s", e)
+                if (attempt + 1) % n_keys == 0 and attempt + 1 < n_keys * 2:
+                    await asyncio.sleep(_retry_delay())
                 continue
 
             if resp.status_code in _ROTATE_STATUS:
                 last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 log.warning("키 #%d 응답 %d — 로테이션", attempt % n_keys + 1, resp.status_code)
-                if attempt >= n_keys - 1:
-                    await asyncio.sleep(2)
+                # 모든 키를 한 번 사용한 뒤에만 백오프한다. 기존 구현처럼 두 번째
+                # 라운드의 매 요청마다 sleep하지 않아 장애 복구 지연이 누적되지 않는다.
+                if (attempt + 1) % n_keys == 0 and attempt + 1 < n_keys * 2:
+                    await asyncio.sleep(_retry_delay())
                 continue
 
             if resp.status_code != 200:
                 raise GeminiError(f"Gemini API 오류 HTTP {resp.status_code}: {resp.text[:500]}")
 
-            data = resp.json()
+            data: dict[str, Any] = {}
             try:
+                parsed = resp.json()
+                if not isinstance(parsed, dict):
+                    raise ValueError("response JSON is not an object")
+                data = parsed
                 candidate = data["candidates"][0]
                 text = "".join(
                     p.get("text", "") for p in candidate["content"]["parts"]
                 )
-                return json.loads(text)
-            except (KeyError, IndexError, json.JSONDecodeError) as e:
-                finish = data.get("candidates", [{}])[0].get("finishReason", "?")
+                result = json.loads(text)
+                if not isinstance(result, dict):
+                    raise ValueError("generated JSON is not an object")
+                return result
+            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
+                candidates = data.get("candidates")
+                finish = (
+                    candidates[0].get("finishReason", "?")
+                    if isinstance(candidates, list)
+                    and candidates
+                    and isinstance(candidates[0], dict)
+                    else "?"
+                )
                 raise GeminiError(
                     f"Gemini 응답 파싱 실패 (finishReason={finish}): {e}"
                 ) from e

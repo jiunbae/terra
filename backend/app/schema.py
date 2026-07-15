@@ -8,14 +8,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+NameText = Annotated[str, Field(max_length=120)]
+ShortText = Annotated[str, Field(max_length=512)]
+LongText = Annotated[str, Field(max_length=4096)]
+PromptText = Annotated[str, Field(max_length=8192)]
+HexColor = Annotated[str, Field(max_length=7, pattern=r"^#[0-9a-fA-F]{6}$")]
+
 
 class Planet(BaseModel):
-    name: str = "이름 없는 행성"
-    shape: str = "sphere"  # sphere | oblate | irregular
+    name: NameText = "이름 없는 행성"
+    shape: Literal["sphere", "oblate", "irregular"] = "sphere"
     oblateness: float = Field(default=0.0, ge=0.0, le=0.35)
     radius_km: float = Field(default=6371, gt=100, lt=200000)
     gravity_g: float = Field(default=1.0, gt=0.01, lt=20)
@@ -25,17 +31,17 @@ class Planet(BaseModel):
 
 class Star(BaseModel):
     count: int = Field(default=1, ge=0, le=3)
-    color_hex: str = "#fff4e0"
-    colors_hex: list[str] = Field(default_factory=list)
+    color_hex: HexColor = "#fff4e0"
+    colors_hex: list[HexColor] = Field(default_factory=list, max_length=3)
     intensity: float = Field(default=1.0, ge=0.2, le=3.0)
 
 
 class Atmosphere(BaseModel):
     present: bool = True
     density: float = Field(default=0.5, ge=0.0, le=1.0)
-    color_hex: str = "#7ab8ff"
-    composition: str = ""
-    weather_summary: str = ""
+    color_hex: HexColor = "#7ab8ff"
+    composition: LongText = ""
+    weather_summary: LongText = ""
 
 
 class Climate(BaseModel):
@@ -43,17 +49,17 @@ class Climate(BaseModel):
     temp_min_c: float = -20
     temp_max_c: float = 45
     humidity: float = Field(default=0.5, ge=0.0, le=1.0)
-    phenomena: list[str] = Field(default_factory=list)
+    phenomena: list[ShortText] = Field(default_factory=list, max_length=16)
 
 
 class Palette(BaseModel):
-    ocean_deep: str = "#0b2e59"
-    ocean_shallow: str = "#1d6fa5"
-    shore: str = "#c2b280"
-    lowland: str = "#4a7c3a"
-    midland: str = "#7a6f45"
-    highland: str = "#8a8578"
-    peak: str = "#e8e8e8"
+    ocean_deep: HexColor = "#0b2e59"
+    ocean_shallow: HexColor = "#1d6fa5"
+    shore: HexColor = "#c2b280"
+    lowland: HexColor = "#4a7c3a"
+    midland: HexColor = "#7a6f45"
+    highland: HexColor = "#8a8578"
+    peak: HexColor = "#e8e8e8"
 
 
 class Surface(BaseModel):
@@ -97,51 +103,51 @@ class Surface(BaseModel):
             "giant_flora",
             "ice_spires",
         ]
-    ] = Field(default_factory=list)
-    visual_prompt: str = ""
+    ] = Field(default_factory=list, max_length=8)
+    visual_prompt: PromptText = ""
     palette: Palette = Palette()
-    description: str = ""
+    description: PromptText = ""
 
 
 class Clouds(BaseModel):
     coverage: float = Field(default=0.4, ge=0.0, le=1.0)
-    color_hex: str = "#ffffff"
+    color_hex: HexColor = "#ffffff"
     speed: float = Field(default=0.3, ge=0.0, le=1.0)
     storminess: float = Field(default=0.2, ge=0.0, le=1.0)
 
 
 class Rings(BaseModel):
     present: bool = False
-    color_hex: str = "#c9b797"
+    color_hex: HexColor = "#c9b797"
     inner_ratio: float = Field(default=1.4, ge=1.1, le=3.0)
     outer_ratio: float = Field(default=2.2, ge=1.2, le=5.0)
     opacity: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
 class Moon(BaseModel):
-    name: str = ""
+    name: NameText = ""
     size_ratio: float = Field(default=0.27, ge=0.01, le=0.8)
     distance_ratio: float = Field(default=8.0, ge=2.0, le=30.0)
-    color_hex: str = "#b8b8b8"
+    color_hex: HexColor = "#b8b8b8"
 
 
 class Inhabitant(BaseModel):
-    name: str = ""
-    category: str = ""  # 예: 지성체, 동물, 식물, 기계
+    name: NameText = ""
+    category: ShortText = ""  # 예: 지성체, 동물, 식물, 기계
     height_m: float = Field(default=1.7, gt=0.001, lt=1000)
-    appearance: str = ""
-    physiology: str = ""
-    culture: str = ""
-    gravity_adaptation: str = ""
-    portrait_prompt: str = ""  # 이후 이미지 생성 단계에서 사용
+    appearance: LongText = ""
+    physiology: LongText = ""
+    culture: LongText = ""
+    gravity_adaptation: LongText = ""
+    portrait_prompt: PromptText = ""  # 이후 이미지 생성 단계에서 사용
 
 
 class Inference(BaseModel):
-    topic: str
-    claim: str
-    confidence: str = "inferred"  # stated | inferred | speculative
-    evidence_quote: str = ""
-    reasoning: str = ""
+    topic: ShortText
+    claim: LongText
+    confidence: Literal["stated", "inferred", "speculative"] = "inferred"
+    evidence_quote: LongText = ""
+    reasoning: LongText = ""
 
 
 class PlanetSpec(BaseModel):
@@ -152,13 +158,27 @@ class PlanetSpec(BaseModel):
     surface: Surface = Surface()
     clouds: Clouds = Clouds()
     rings: Rings = Rings()
-    moons: list[Moon] = Field(default_factory=list)
-    inhabitants: list[Inhabitant] = Field(default_factory=list)
-    inferences: list[Inference] = Field(default_factory=list)
+    moons: list[Moon] = Field(default_factory=list, max_length=8)
+    inhabitants: list[Inhabitant] = Field(default_factory=list, max_length=16)
+    inferences: list[Inference] = Field(default_factory=list, max_length=64)
 
 
 def _hex() -> dict[str, Any]:
-    return {"type": "string", "description": "#rrggbb 형식 hex 색상"}
+    return {
+        "type": "string",
+        "description": "#rrggbb 형식 hex 색상",
+    }
+
+
+def _text(max_length: int = 4096, desc: str = "") -> dict[str, Any]:
+    # Gemini generateContent responseSchema가 지원한다고 문서화한 OpenAPI
+    # 부분집합에는 string의 maxLength/pattern이 없다. 길이/형식 제한은 아래
+    # Pydantic 모델에서 강제하고, 모델에는 의미 설명만 전달한다.
+    del max_length
+    result: dict[str, Any] = {"type": "string"}
+    if desc:
+        result["description"] = desc
+    return result
 
 
 def _num(lo: float | None = None, hi: float | None = None, desc: str = "") -> dict[str, Any]:
@@ -179,7 +199,7 @@ GEMINI_SCHEMA: dict[str, Any] = {
         "planet": {
             "type": "object",
             "properties": {
-                "name": {"type": "string"},
+                "name": _text(120),
                 "shape": {"type": "string", "enum": ["sphere", "oblate", "irregular"]},
                 "oblateness": _num(0, 0.35, "편평도. 빠른 자전/타원형 묘사 시 큼"),
                 "radius_km": _num(100, 200000),
@@ -196,6 +216,7 @@ GEMINI_SCHEMA: dict[str, Any] = {
                 "color_hex": _hex(),
                 "colors_hex": {
                     "type": "array",
+                    "maxItems": 3,
                     "description": "항성별 빛 색상. count와 같은 개수",
                     "items": _hex(),
                 },
@@ -209,8 +230,8 @@ GEMINI_SCHEMA: dict[str, Any] = {
                 "present": {"type": "boolean"},
                 "density": _num(0, 1),
                 "color_hex": _hex(),
-                "composition": {"type": "string"},
-                "weather_summary": {"type": "string"},
+                "composition": _text(),
+                "weather_summary": _text(),
             },
         },
         "climate": {
@@ -220,7 +241,7 @@ GEMINI_SCHEMA: dict[str, Any] = {
                 "temp_min_c": _num(-270, 1500),
                 "temp_max_c": _num(-270, 1500),
                 "humidity": _num(0, 1),
-                "phenomena": {"type": "array", "items": {"type": "string"}},
+                "phenomena": {"type": "array", "maxItems": 16, "items": _text(512)},
             },
         },
         "surface": {
@@ -256,6 +277,7 @@ GEMINI_SCHEMA: dict[str, Any] = {
                 },
                 "landmarks": {
                     "type": "array",
+                    "maxItems": 8,
                     "description": "원문에서 시각적으로 드러나는 지표 랜드마크. 명시된 것만 선택",
                     "items": {
                         "type": "string",
@@ -271,10 +293,10 @@ GEMINI_SCHEMA: dict[str, Any] = {
                         ],
                     },
                 },
-                "visual_prompt": {
-                    "type": "string",
-                    "description": "행성 전체 이미지 생성용 영어 시각 지시. 원문에 근거한 독특한 지형·날씨·색만 구체적으로 기술",
-                },
+                "visual_prompt": _text(
+                    8192,
+                    "행성 전체 이미지 생성용 영어 시각 지시. 원문에 근거한 독특한 지형·날씨·색만 구체적으로 기술",
+                ),
                 "palette": {
                     "type": "object",
                     "properties": {
@@ -287,7 +309,7 @@ GEMINI_SCHEMA: dict[str, Any] = {
                         "peak": _hex(),
                     },
                 },
-                "description": {"type": "string"},
+                "description": _text(8192),
             },
             "required": ["feature_type", "feature_scale", "biome_contrast", "material_type", "landmarks", "visual_prompt"],
         },
@@ -312,10 +334,11 @@ GEMINI_SCHEMA: dict[str, Any] = {
         },
         "moons": {
             "type": "array",
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
+                    "name": _text(120),
                     "size_ratio": _num(0.01, 0.8),
                     "distance_ratio": _num(2.0, 30.0),
                     "color_hex": _hex(),
@@ -324,37 +347,39 @@ GEMINI_SCHEMA: dict[str, Any] = {
         },
         "inhabitants": {
             "type": "array",
+            "maxItems": 16,
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "category": {"type": "string"},
+                    "name": _text(120),
+                    "category": _text(512),
                     "height_m": _num(0.001, 1000),
-                    "appearance": {"type": "string"},
-                    "physiology": {"type": "string"},
-                    "culture": {"type": "string"},
-                    "gravity_adaptation": {"type": "string"},
-                    "portrait_prompt": {
-                        "type": "string",
-                        "description": "이 거주민의 초상을 그리기 위한 영어 이미지 생성 프롬프트",
-                    },
+                    "appearance": _text(),
+                    "physiology": _text(),
+                    "culture": _text(),
+                    "gravity_adaptation": _text(),
+                    "portrait_prompt": _text(
+                        8192,
+                        "이 거주민의 초상을 그리기 위한 영어 이미지 생성 프롬프트",
+                    ),
                 },
                 "required": ["name", "appearance"],
             },
         },
         "inferences": {
             "type": "array",
+            "maxItems": 64,
             "items": {
                 "type": "object",
                 "properties": {
-                    "topic": {"type": "string"},
-                    "claim": {"type": "string"},
+                    "topic": _text(512),
+                    "claim": _text(),
                     "confidence": {
                         "type": "string",
                         "enum": ["stated", "inferred", "speculative"],
                     },
-                    "evidence_quote": {"type": "string"},
-                    "reasoning": {"type": "string"},
+                    "evidence_quote": _text(),
+                    "reasoning": _text(),
                 },
                 "required": ["topic", "claim", "confidence"],
             },
