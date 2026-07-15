@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import hmac
 import os
 import re
 import shutil
@@ -30,8 +31,16 @@ from .images import (
 from .image_jobs import ImageQueueFull, ImageStorageFull, image_jobs
 from .http_security import ContentLengthLimitMiddleware, ProductionHeadersMiddleware
 from .maintenance import cleanup_generated_images
+from .observability import (
+    CorrelationLogFilter,
+    RequestObservabilityMiddleware,
+    observe_readiness,
+    prometheus_text,
+)
 from .rate_limit import RateLimiter
 from .repository import (
+    create_moderation_report,
+    delete_planet,
     get_planet,
     healthcheck_database,
     list_public_planets,
@@ -43,6 +52,19 @@ from .schema import GEMINI_SCHEMA, PlanetSpec, ShortText
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("terra")
+if not any(getattr(handler, "terra_correlation", False) for handler in log.handlers):
+    correlation_handler = logging.StreamHandler()
+    correlation_handler.terra_correlation = True  # type: ignore[attr-defined]
+    correlation_handler.addFilter(CorrelationLogFilter())
+    correlation_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s "
+            "request_id=%(request_id)s job_id=%(job_correlation_id)s %(message)s"
+        )
+    )
+    log.addHandler(correlation_handler)
+log.setLevel(logging.INFO)
+log.propagate = False
 # 외부 요청 URL을 INFO로 남기지 않는다. API 키는 헤더로 전송하며 로그에도 기록하지 않는다.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -125,6 +147,9 @@ app.add_middleware(
     max_bytes=int(os.environ.get("TERRA_MAX_REQUEST_BYTES", str(1024 * 1024))),
 )
 app.add_middleware(ProductionHeadersMiddleware)
+# 마지막에 등록한 user middleware가 가장 바깥에서 동작한다. 따라서 CORS,
+# Host/body 제한 응답까지 같은 bounded route metric과 서버 생성 request ID를 받는다.
+app.add_middleware(RequestObservabilityMiddleware)
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=GENERATED_DIR), name="generated")
 
@@ -142,6 +167,14 @@ image_global_limiter = RateLimiter(
 )
 save_limiter = RateLimiter(
     limit=int(os.environ.get("TERRA_SAVE_RATE_LIMIT", "12")),
+    window_seconds=3600,
+)
+report_limiter = RateLimiter(
+    limit=int(os.environ.get("TERRA_REPORT_RATE_LIMIT", "5")),
+    window_seconds=3600,
+)
+report_global_limiter = RateLimiter(
+    limit=int(os.environ.get("TERRA_REPORT_GLOBAL_RATE_LIMIT", "60")),
     window_seconds=3600,
 )
 analyze_slots = asyncio.Semaphore(int(os.environ.get("TERRA_ANALYZE_CONCURRENCY", "3")))
@@ -256,6 +289,22 @@ class UpdateCoverRequest(BaseModel):
     edit_token: str = Field(min_length=20, max_length=200)
 
 
+class DeletePlanetRequest(BaseModel):
+    edit_token: str = Field(min_length=20, max_length=200)
+
+
+class ReportPlanetRequest(BaseModel):
+    reason: Literal[
+        "personal_information",
+        "copyright",
+        "harassment",
+        "unsafe_content",
+        "spam",
+        "other",
+    ]
+    details: str = Field(default="", max_length=500)
+
+
 def _safe_cover_url(value: str | None) -> str | None:
     if value is None:
         return None
@@ -278,6 +327,14 @@ def _safe_image_asset(value: SavedImageAsset) -> dict[str, Any]:
     result = value.model_dump()
     result["url"] = _safe_cover_url(value.url)
     return result
+
+
+def _public_saved_spec(value: PlanetSpec) -> PlanetSpec:
+    """공개 저장본에서 원문 직접 인용만 제거하고 로컬 분석값은 바꾸지 않는다."""
+    public_spec = value.model_copy(deep=True)
+    for inference in public_spec.inferences:
+        inference.evidence_quote = ""
+    return public_spec
 
 
 @app.get("/api/health")
@@ -306,27 +363,55 @@ async def readiness(response: Response) -> dict[str, Any]:
     except ValueError:
         minimum_free_mb = 2048
     try:
-        free_disk_mb = shutil.disk_usage(GENERATED_DIR).free // (1024 * 1024)
+        free_disk_bytes = shutil.disk_usage(GENERATED_DIR).free
     except OSError:
-        free_disk_mb = 0
+        free_disk_bytes = 0
+    free_disk_mb = free_disk_bytes // (1024 * 1024)
     disk_ready = free_disk_mb >= minimum_free_mb
     frontend_ready = ENVIRONMENT != "production" or FRONTEND_DIST.is_dir()
     image_provider = provider_status()
     ready = database_ready and key_ready and disk_ready and frontend_ready
+    checks = {
+        "database": database_ready,
+        "analysis_provider": key_ready,
+        "storage": disk_ready,
+        "frontend": frontend_ready,
+        # 이미지 생성기는 선택 기능이므로 readiness를 막지 않고 degraded로 표시한다.
+        "image_provider": image_provider.available,
+    }
+    observe_readiness(checks, free_disk_bytes=free_disk_bytes)
     response.status_code = 200 if ready else 503
     return {
         "status": "ready" if ready else "not_ready",
-        "checks": {
-            "database": database_ready,
-            "analysis_provider": key_ready,
-            "storage": disk_ready,
-            "frontend": frontend_ready,
-            # 이미지 생성기는 선택 기능이므로 readiness를 막지 않고 degraded로 표시한다.
-            "image_provider": image_provider.available,
-        },
+        "checks": checks,
         "queue": queue,
         "free_disk_mb": free_disk_mb,
     }
+
+
+@app.get("/api/admin/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request) -> Response:
+    """Expose bounded process metrics only to a bearer-authenticated scraper."""
+    expected = os.environ.get("TERRA_METRICS_TOKEN", "").strip()
+    if len(expected) < 32:
+        # 비활성 설치에서는 라우트 존재 자체를 공개하지 않는다.
+        raise HTTPException(status_code=404, detail="Not found")
+    scheme, separator, supplied = request.headers.get("authorization", "").partition(" ")
+    if (
+        separator != " "
+        or scheme.lower() != "bearer"
+        or not hmac.compare_digest(supplied, expected)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return Response(
+        prometheus_text(),
+        media_type="text/plain; version=0.0.4",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/image/status")
@@ -424,6 +509,7 @@ async def cancel_image_job(job_id: str) -> dict[str, Any]:
 @app.post("/api/planets", status_code=201)
 async def create_saved_planet(req: SavePlanetRequest, request: Request) -> dict[str, Any]:
     await save_limiter.check(request)
+    public_spec = _public_saved_spec(req.spec)
     image_assets = {
         _safe_image_key(key, inhabitant_count=len(req.spec.inhabitants)): _safe_image_asset(asset)
         for key, asset in req.image_assets.items()
@@ -433,9 +519,9 @@ async def create_saved_planet(req: SavePlanetRequest, request: Request) -> dict[
         cover_image_url = image_assets["planet"]["url"]
     return await asyncio.to_thread(
         save_planet,
-        spec=req.spec,
+        spec=public_spec,
         # 공개 영구 데이터는 클라이언트가 제출한 파생값을 신뢰하지 않는다.
-        physics=derive_physics(req.spec),
+        physics=derive_physics(public_spec),
         model=MODEL,
         cover_image_url=cover_image_url,
         is_public=req.public,
@@ -457,6 +543,46 @@ async def saved_planet(planet_id: str) -> dict[str, Any]:
     if planet is None:
         raise HTTPException(status_code=404, detail="저장된 행성을 찾을 수 없습니다.")
     return planet
+
+
+@app.post("/api/planets/{planet_id}/reports", status_code=202)
+async def report_saved_planet(
+    planet_id: str,
+    req: ReportPlanetRequest,
+    request: Request,
+) -> dict[str, str]:
+    await report_limiter.check(request)
+    await report_global_limiter.check(request, key_override="global")
+    details = req.details.strip()
+    if req.reason == "other" and not details:
+        raise HTTPException(status_code=422, detail="기타 신고 사유를 간단히 적어 주세요.")
+    created = await asyncio.to_thread(
+        create_moderation_report,
+        planet_id,
+        req.reason,
+        details,
+    )
+    if not created:
+        raise HTTPException(status_code=404, detail="저장된 행성을 찾을 수 없습니다.")
+    # 내부 신고 ID나 요청자 관련 정보는 공개 응답에 포함하지 않는다.
+    return {"status": "received"}
+
+
+@app.delete("/api/planets/{planet_id}", status_code=204)
+async def delete_saved_planet(
+    planet_id: str,
+    req: DeletePlanetRequest,
+    request: Request,
+) -> Response:
+    await save_limiter.check(request)
+    try:
+        deleted = await asyncio.to_thread(delete_planet, planet_id, req.edit_token)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="저장된 행성을 찾을 수 없습니다.")
+    # capability와 삭제된 데이터가 응답으로 되돌아가지 않게 빈 응답만 보낸다.
+    return Response(status_code=204)
 
 
 @app.patch("/api/planets/{planet_id}/cover")

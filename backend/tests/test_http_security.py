@@ -35,6 +35,16 @@ class HttpSecurityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 413)
 
+    def test_oversized_delete_capability_body_is_rejected_before_parsing(self) -> None:
+        response = self.client.request(
+            "DELETE",
+            "/api/planets/example",
+            content=b"x" * (1024 * 1024 + 1),
+            headers={"content-type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 413)
+
     def test_cors_preflight_also_has_security_headers(self) -> None:
         response = self.client.options(
             "/api/analyze",

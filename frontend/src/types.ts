@@ -220,3 +220,11 @@ export interface SavedPlanet extends AnalyzeResponse {
   updated_at: string
   edit_token?: string
 }
+
+export type ReportReason =
+  | 'personal_information'
+  | 'copyright'
+  | 'harassment'
+  | 'unsafe_content'
+  | 'spam'
+  | 'other'

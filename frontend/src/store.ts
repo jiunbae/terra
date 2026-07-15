@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   analyzeText,
   assetUrl,
+  deleteSavedPlanet,
   generateArtwork,
   getGallery,
   getImageStatus,
@@ -99,6 +100,7 @@ interface TerraState {
   savedPlanetId: string | null
   savedEditToken: string | null
   savingPlanet: boolean
+  deletingPlanet: boolean
   saveError: string | null
   setPanelOpen: (open: boolean) => void
   setDraftText: (text: string) => void
@@ -109,6 +111,7 @@ interface TerraState {
   generateImage: (spec: PlanetSpec, kind: 'planet' | 'surface' | 'inhabitant', index?: number) => Promise<void>
   loadGallery: (signal?: AbortSignal) => Promise<void>
   saveCurrentPlanet: () => Promise<void>
+  deleteCurrentPlanet: () => Promise<boolean>
   openSavedPlanet: (id: string) => Promise<boolean>
   analyze: (text: string) => Promise<void>
   reset: () => void
@@ -135,6 +138,7 @@ export const useTerra = create<TerraState>((set, get) => ({
   savedPlanetId: null,
   savedEditToken: null,
   savingPlanet: false,
+  deletingPlanet: false,
   saveError: null,
   setPanelOpen: (panelOpen) => {
     persistPreference(PANEL_OPEN_KEY, panelOpen)
@@ -295,6 +299,43 @@ export const useTerra = create<TerraState>((set, get) => ({
       if (saveController === controller) saveController = null
     }
   },
+  deleteCurrentPlanet: async () => {
+    const { savedPlanetId, savedEditToken } = get()
+    if (!savedPlanetId || !savedEditToken) {
+      set({ saveError: '이 브라우저에는 행성을 삭제할 편집 권한이 없습니다.' })
+      return false
+    }
+    set({ deletingPlanet: true, saveError: null })
+    try {
+      await deleteSavedPlanet(savedPlanetId, savedEditToken)
+      try {
+        window.localStorage.removeItem(`terra:edit:${savedPlanetId}`)
+      } catch {
+        // 브라우저 저장소가 차단돼도 서버 삭제 결과는 그대로 반영한다.
+      }
+      if (get().savedPlanetId === savedPlanetId) {
+        window.history.replaceState(null, '', '/')
+        set({
+          savedPlanetId: null,
+          savedEditToken: null,
+          deletingPlanet: false,
+          saveError: null,
+        })
+      } else {
+        set({ deletingPlanet: false })
+      }
+      set((state) => ({
+        gallery: state.gallery.filter((planet) => planet.id !== savedPlanetId),
+      }))
+      return true
+    } catch (error) {
+      set({
+        deletingPlanet: false,
+        saveError: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  },
   openSavedPlanet: async (id) => {
     abortAllGenerations()
     abortAnalysis()
@@ -307,6 +348,7 @@ export const useTerra = create<TerraState>((set, get) => ({
       error: null,
       saveError: null,
       savingPlanet: false,
+      deletingPlanet: false,
       generating: {},
       imagePhases: {},
       imageProgress: {},
@@ -368,6 +410,7 @@ export const useTerra = create<TerraState>((set, get) => ({
       loading: true,
       error: null,
       savingPlanet: false,
+      deletingPlanet: false,
       generating: {},
       imagePhases: {},
       imageProgress: {},
@@ -387,6 +430,7 @@ export const useTerra = create<TerraState>((set, get) => ({
         savedPlanetId: null,
         savedEditToken: null,
         saveError: null,
+        deletingPlanet: false,
       })
     } catch (e) {
       if (controller.signal.aborted) return
@@ -414,6 +458,7 @@ export const useTerra = create<TerraState>((set, get) => ({
       savedEditToken: null,
       saveError: null,
       savingPlanet: false,
+      deletingPlanet: false,
     })
   },
 }))

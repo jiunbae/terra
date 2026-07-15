@@ -17,6 +17,17 @@ from .schema import PlanetSpec
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DB_PATH = DATA_DIR / "terra.sqlite3"
+REPORT_REASONS = frozenset(
+    {
+        "personal_information",
+        "copyright",
+        "harassment",
+        "unsafe_content",
+        "spam",
+        "other",
+    }
+)
+PUBLIC_EVIDENCE_REDACTION_MIGRATION = "20260715_public_evidence_quote_redaction"
 
 
 def _connect() -> sqlite3.Connection:
@@ -84,7 +95,71 @@ def initialize() -> None:
             db.execute(
                 "ALTER TABLE planets ADD COLUMN image_assets_json TEXT NOT NULL DEFAULT '{}'"
             )
-        db.execute("CREATE INDEX IF NOT EXISTS idx_planets_public_created ON planets(is_public, created_at DESC)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_planets_public_created "
+            "ON planets(is_public, created_at DESC)"
+        )
+        # 신고에는 IP나 편집 capability를 보존하지 않는다. 행성이 삭제되면 공개
+        # 콘텐츠와 분리된 불필요한 신고 데이터도 같은 트랜잭션에서 정리된다.
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS moderation_reports (
+                id TEXT PRIMARY KEY,
+                planet_id TEXT NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+                reason TEXT NOT NULL CHECK (reason IN (
+                    'personal_information', 'copyright', 'harassment',
+                    'unsafe_content', 'spam', 'other'
+                )),
+                details TEXT NOT NULL DEFAULT '' CHECK (length(details) <= 500),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_moderation_reports_planet_created "
+            "ON moderation_reports(planet_id, created_at DESC)"
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        applied = db.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = ?",
+            (PUBLIC_EVIDENCE_REDACTION_MIGRATION,),
+        ).fetchone()
+        if applied is None:
+            # 과거 공개 저장본에도 원문 직접 인용이 남아 있었다. 다른 필드와
+            # 기존 ID/자산/시간은 보존하고 공개 spec의 인용만 한 트랜잭션에서 지운다.
+            for row in db.execute(
+                "SELECT id, spec_json FROM planets WHERE is_public = 1"
+            ).fetchall():
+                spec = json.loads(row["spec_json"])
+                if not isinstance(spec, dict):
+                    raise ValueError("saved public planet spec must be a JSON object")
+                inferences = spec.get("inferences", [])
+                if not isinstance(inferences, list):
+                    raise ValueError("saved public planet inferences must be a JSON array")
+                changed = False
+                for inference in inferences:
+                    if isinstance(inference, dict) and inference.get("evidence_quote"):
+                        inference["evidence_quote"] = ""
+                        changed = True
+                if changed:
+                    db.execute(
+                        "UPDATE planets SET spec_json = ? WHERE id = ?",
+                        (json.dumps(spec, ensure_ascii=False), row["id"]),
+                    )
+            db.execute(
+                "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+                (
+                    PUBLIC_EVIDENCE_REDACTION_MIGRATION,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
 
 
 def healthcheck_database() -> bool:
@@ -123,6 +198,12 @@ def save_planet(
     planet_id = secrets.token_urlsafe(9)
     edit_token = secrets.token_urlsafe(24)
     edit_token_hash = hashlib.sha256(edit_token.encode()).hexdigest()
+    stored_spec = spec.model_copy(deep=True)
+    if is_public:
+        # API 외의 내부 호출도 공개 원문 인용을 다시 저장하지 못하게 영속성
+        # 경계에서 한 번 더 최소화한다. 호출자가 가진 로컬 spec은 변경하지 않는다.
+        for inference in stored_spec.inferences:
+            inference.evidence_quote = ""
     with _db(write=True) as db:
         db.execute(
             """
@@ -134,12 +215,12 @@ def save_planet(
             """,
             (
                 planet_id,
-                spec.planet.name,
-                spec.surface.description,
-                spec.surface.feature_type,
-                spec.planet.gravity_g,
-                len(spec.inhabitants),
-                json.dumps(spec.model_dump(mode="json"), ensure_ascii=False),
+                stored_spec.planet.name,
+                stored_spec.surface.description,
+                stored_spec.surface.feature_type,
+                stored_spec.planet.gravity_g,
+                len(stored_spec.inhabitants),
+                json.dumps(stored_spec.model_dump(mode="json"), ensure_ascii=False),
                 json.dumps(physics, ensure_ascii=False),
                 model,
                 cover_image_url,
@@ -246,6 +327,56 @@ def update_image_asset(
             )
         updated = db.execute("SELECT * FROM planets WHERE id = ?", (planet_id,)).fetchone()
     return _row_to_detail(updated) if updated is not None else None
+
+
+def delete_planet(planet_id: str, edit_token: str) -> bool:
+    """편집 capability를 검증하고 행성 레코드만 원자적으로 삭제한다.
+
+    생성 파일은 여기서 건드리지 않는다. 삭제된 행성이 참조하던 파일은 기존
+    유지보수 작업이 유예 기간과 디스크 정책에 따라 비동기로 회수한다.
+    """
+    with _db(write=True) as db:
+        auth = db.execute(
+            "SELECT edit_token_hash FROM planets WHERE id = ?",
+            (planet_id,),
+        ).fetchone()
+        if auth is None:
+            return False
+        token_hash = hashlib.sha256(edit_token.encode()).hexdigest()
+        if not hmac.compare_digest(auth["edit_token_hash"], token_hash):
+            raise PermissionError("행성을 삭제할 권한이 없습니다.")
+        deleted = db.execute("DELETE FROM planets WHERE id = ?", (planet_id,))
+        return deleted.rowcount == 1
+
+
+def create_moderation_report(planet_id: str, reason: str, details: str = "") -> bool:
+    """공개 행성에 대한 최소한의 신고 내용을 저장한다.
+
+    요청자 식별자와 편집 capability는 저장하지 않으며, 호출자 계층의 검증을
+    우회한 내부 호출에도 DB 경계를 지키도록 허용값과 길이를 다시 확인한다.
+    """
+    if reason not in REPORT_REASONS:
+        raise ValueError("unsupported moderation reason")
+    if len(details) > 500:
+        raise ValueError("moderation details are too long")
+
+    now = datetime.now(timezone.utc).isoformat()
+    report_id = secrets.token_urlsafe(12)
+    with _db(write=True) as db:
+        exists = db.execute(
+            "SELECT 1 FROM planets WHERE id = ? AND is_public = 1",
+            (planet_id,),
+        ).fetchone()
+        if exists is None:
+            return False
+        db.execute(
+            """
+            INSERT INTO moderation_reports (id, planet_id, reason, details, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (report_id, planet_id, reason, details, now),
+        )
+    return True
 
 
 initialize()

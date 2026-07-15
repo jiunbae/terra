@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 import os
@@ -21,7 +22,7 @@ from app.main import app
 from app.image_jobs import ImageJob
 from app.planet_guide import create_planet_guide
 from app import repository
-from app.schema import Inhabitant, PlanetSpec
+from app.schema import Inference, Inhabitant, PlanetSpec
 
 
 class PhysicsTests(unittest.TestCase):
@@ -214,6 +215,37 @@ class ApiTests(unittest.TestCase):
         self.assertAlmostEqual(kwargs["physics"]["mass_earths"], 1.0, delta=0.01)
         self.assertNotEqual(kwargs["model"], "untrusted-client-model")
 
+    def test_public_save_strips_evidence_quotes_without_changing_other_inference_fields(self) -> None:
+        spec = PlanetSpec()
+        spec.inferences = [
+            Inference(
+                topic="대기",
+                claim="대기가 짙다",
+                evidence_quote="출판 전 원문 문장",
+                reasoning="빛의 산란 묘사에 근거",
+            )
+        ]
+        with patch(
+            "app.main.save_planet",
+            return_value={"id": "saved", "spec": spec.model_dump(), "edit_token": "token"},
+        ) as save:
+            response = self.client.post(
+                "/api/planets",
+                json={
+                    "spec": spec.model_dump(),
+                    "physics": {},
+                    "model": "client",
+                    "public": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        public_inference = save.call_args.kwargs["spec"].inferences[0]
+        self.assertEqual(public_inference.evidence_quote, "")
+        self.assertEqual(public_inference.claim, "대기가 짙다")
+        self.assertEqual(public_inference.reasoning, "빛의 산란 묘사에 근거")
+        self.assertEqual(spec.inferences[0].evidence_quote, "출판 전 원문 문장")
+
     def test_private_save_and_nested_generated_path_are_rejected(self) -> None:
         spec = PlanetSpec().model_dump()
         private = self.client.post(
@@ -239,6 +271,47 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertTrue(get.call_args.kwargs["public_only"])
 
+    def test_report_intake_is_bounded_and_returns_no_internal_id(self) -> None:
+        with (
+            patch("app.main.report_limiter.check", new=AsyncMock()),
+            patch("app.main.report_global_limiter.check", new=AsyncMock()),
+            patch("app.main.create_moderation_report", return_value=True) as create_report,
+        ):
+            response = self.client.post(
+                "/api/planets/public-id/reports",
+                json={"reason": "copyright", "details": " 권리자 확인 요청 "},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"status": "received"})
+        create_report.assert_called_once_with("public-id", "copyright", "권리자 확인 요청")
+        invalid = self.client.post(
+            "/api/planets/public-id/reports",
+            json={"reason": "free-form-unbounded", "details": "x"},
+        )
+        self.assertEqual(invalid.status_code, 422)
+        oversized = self.client.post(
+            "/api/planets/public-id/reports",
+            json={"reason": "spam", "details": "x" * 501},
+        )
+        self.assertEqual(oversized.status_code, 422)
+
+    def test_delete_requires_capability_and_returns_an_empty_response(self) -> None:
+        token = "valid-edit-capability-token"
+        with (
+            patch("app.main.save_limiter.check", new=AsyncMock()),
+            patch("app.main.delete_planet", return_value=True) as delete,
+        ):
+            response = self.client.request(
+                "DELETE",
+                "/api/planets/saved-id",
+                json={"edit_token": token},
+            )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b"")
+        delete.assert_called_once_with("saved-id", token)
+
 
 class RepositoryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -254,6 +327,9 @@ class RepositoryTests(unittest.TestCase):
     def test_save_list_share_and_authorized_cover_update(self) -> None:
         spec = PlanetSpec()
         spec.planet.name = "공유 행성"
+        spec.inferences = [
+            Inference(topic="근거", claim="공개 주장", evidence_quote="비공개 원문")
+        ]
         saved = repository.save_planet(
             spec=spec,
             physics={"mass_earths": 1.0},
@@ -270,7 +346,11 @@ class RepositoryTests(unittest.TestCase):
             },
         )
         self.assertEqual(repository.list_public_planets()[0]["name"], "공유 행성")
-        self.assertEqual(repository.get_planet(saved["id"])["spec"]["planet"]["name"], "공유 행성")
+        public_detail = repository.get_planet(saved["id"])
+        self.assertEqual(public_detail["spec"]["planet"]["name"], "공유 행성")
+        self.assertNotIn("edit_token", public_detail)
+        self.assertEqual(saved["spec"]["inferences"][0]["evidence_quote"], "")
+        self.assertEqual(spec.inferences[0].evidence_quote, "비공개 원문")
         self.assertEqual(
             repository.get_planet(saved["id"])["image_assets"]["inhabitant:0"]["seed"],
             17,
@@ -297,6 +377,142 @@ class RepositoryTests(unittest.TestCase):
             saved["edit_token"],
         )
         self.assertEqual(updated["image_assets"]["inhabitant:0"]["seed"], 23)
+
+    def test_report_and_capability_delete_are_transactional_without_sync_file_removal(self) -> None:
+        generated = Path(self.temp.name) / "preserved.png"
+        generated.write_bytes(b"generated-asset")
+        saved = repository.save_planet(
+            spec=PlanetSpec(),
+            physics={"mass_earths": 1.0},
+            model="test-model",
+            cover_image_url="/generated/preserved.png",
+            is_public=True,
+        )
+        self.assertTrue(
+            repository.create_moderation_report(saved["id"], "spam", "중복 저장")
+        )
+
+        with self.assertRaises(PermissionError):
+            repository.delete_planet(saved["id"], "wrong-token")
+        self.assertIsNotNone(repository.get_planet(saved["id"]))
+        with repository._db() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM moderation_reports WHERE planet_id = ?",
+                    (saved["id"],),
+                ).fetchone()[0],
+                1,
+            )
+
+        self.assertTrue(repository.delete_planet(saved["id"], saved["edit_token"]))
+        self.assertIsNone(repository.get_planet(saved["id"]))
+        with repository._db() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM moderation_reports WHERE planet_id = ?",
+                    (saved["id"],),
+                ).fetchone()[0],
+                0,
+            )
+        self.assertTrue(generated.exists())
+
+    def test_reports_accept_only_public_planets_and_store_no_requester_identity(self) -> None:
+        saved = repository.save_planet(
+            spec=PlanetSpec(),
+            physics={"mass_earths": 1.0},
+            model="test-model",
+            cover_image_url=None,
+            is_public=False,
+        )
+        self.assertFalse(repository.create_moderation_report(saved["id"], "spam"))
+        with repository._db() as db:
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(moderation_reports)")
+            }
+        self.assertEqual(
+            columns,
+            {"id", "planet_id", "reason", "details", "created_at"},
+        )
+
+    def test_report_table_migration_preserves_existing_planet_rows(self) -> None:
+        with repository._db(write=True) as db:
+            db.execute("DROP TABLE moderation_reports")
+        saved = repository.save_planet(
+            spec=PlanetSpec(),
+            physics={"mass_earths": 1.0},
+            model="legacy-model",
+            cover_image_url="/generated/legacy.png",
+            is_public=True,
+        )
+
+        repository.initialize()
+
+        migrated = repository.get_planet(saved["id"])
+        self.assertIsNotNone(migrated)
+        self.assertEqual(migrated["model"], "legacy-model")
+        self.assertEqual(migrated["cover_image_url"], "/generated/legacy.png")
+        self.assertTrue(repository.create_moderation_report(saved["id"], "copyright"))
+
+    def test_migration_redacts_legacy_public_quotes_without_touching_private_data(self) -> None:
+        public = repository.save_planet(
+            spec=PlanetSpec(),
+            physics={"mass_earths": 1.0},
+            model="legacy-public-model",
+            cover_image_url="/generated/legacy-public.png",
+            is_public=True,
+        )
+        private = repository.save_planet(
+            spec=PlanetSpec(),
+            physics={"mass_earths": 1.0},
+            model="legacy-private-model",
+            cover_image_url=None,
+            is_public=False,
+        )
+        with repository._db(write=True) as db:
+            for planet_id in (public["id"], private["id"]):
+                raw = json.loads(
+                    db.execute(
+                        "SELECT spec_json FROM planets WHERE id = ?", (planet_id,)
+                    ).fetchone()[0]
+                )
+                raw["inferences"] = [
+                    {
+                        "topic": "legacy",
+                        "claim": "preserved claim",
+                        "confidence": "stated",
+                        "evidence_quote": "direct source quotation",
+                        "reasoning": "preserved reasoning",
+                    }
+                ]
+                db.execute(
+                    "UPDATE planets SET spec_json = ? WHERE id = ?",
+                    (json.dumps(raw), planet_id),
+                )
+            db.execute(
+                "DELETE FROM schema_migrations WHERE name = ?",
+                (repository.PUBLIC_EVIDENCE_REDACTION_MIGRATION,),
+            )
+
+        repository.initialize()
+
+        migrated_public = repository.get_planet(public["id"])
+        migrated_private = repository.get_planet(private["id"])
+        self.assertEqual(
+            migrated_public["spec"]["inferences"][0],
+            {
+                "topic": "legacy",
+                "claim": "preserved claim",
+                "confidence": "stated",
+                "evidence_quote": "",
+                "reasoning": "preserved reasoning",
+            },
+        )
+        self.assertEqual(
+            migrated_private["spec"]["inferences"][0]["evidence_quote"],
+            "direct source quotation",
+        )
+        self.assertEqual(migrated_public["model"], "legacy-public-model")
+        self.assertEqual(migrated_public["cover_image_url"], "/generated/legacy-public.png")
 
 
 if __name__ == "__main__":

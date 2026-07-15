@@ -31,6 +31,7 @@ from .images import (
     image_subprocess_environment,
     provider_status,
 )
+from .observability import TerraMetrics, correlation_fields, job_correlation, metrics
 from .schema import PlanetSpec
 from .world_bible import build_world_bible
 
@@ -97,12 +98,19 @@ class ImageJob:
 
 
 class ImageJobManager:
-    def __init__(self, *, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        state_path: Path | None = None,
+        telemetry: TerraMetrics | None = None,
+    ) -> None:
         self._state_path = state_path
+        self._metrics = telemetry or metrics
         self._jobs: dict[str, ImageJob] = self._load_state()
         self._tasks: set[asyncio.Task[None]] = set()
         self._task_by_job: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
+        self._publish_queue_metrics()
 
     async def create(
         self,
@@ -130,7 +138,14 @@ class ImageJobManager:
         )
         GENERATED_DIR.mkdir(parents=True, exist_ok=True)
         minimum_free = self._env_int("TERRA_MIN_FREE_DISK_MB", 2048, 128, 1_048_576) * 1024 * 1024
-        if shutil.disk_usage(GENERATED_DIR).free < minimum_free:
+        free_bytes = shutil.disk_usage(GENERATED_DIR).free
+        self._metrics.record_storage_free_bytes(free_bytes)
+        if free_bytes < minimum_free:
+            self._metrics.record_image_job(
+                kind=job.kind,
+                quality=job.quality,
+                outcome="rejected_storage",
+            )
             raise ImageStorageFull("이미지 저장 공간이 부족해 새 작업을 시작할 수 없습니다.")
 
         async with self._lock:
@@ -150,11 +165,23 @@ class ImageJobManager:
             max_jobs = self._env_int("TERRA_IMAGE_MAX_ACTIVE_JOBS", 3, 1, 32)
             max_units = self._env_int("TERRA_IMAGE_MAX_WORK_UNITS", 8, 1, 128)
             if len(active) >= max_jobs or active_units + self._work_units(job.quality) > max_units:
+                self._metrics.record_image_job(
+                    kind=job.kind,
+                    quality=job.quality,
+                    outcome="rejected_queue",
+                )
+                self._publish_queue_metrics()
                 raise ImageQueueFull(
                     self._env_int("TERRA_IMAGE_QUEUE_RETRY_AFTER", 120, 5, 3600)
                 )
             self._jobs[job.id] = job
             self._persist_state()
+            self._metrics.record_image_job(
+                kind=job.kind,
+                quality=job.quality,
+                outcome="accepted",
+            )
+            self._publish_queue_metrics()
 
         task = asyncio.create_task(
             self._run(job.id, prompt, negative_prompt, spec, inhabitant_index)
@@ -167,6 +194,7 @@ class ImageJobManager:
     def _task_done(self, job_id: str, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
         self._task_by_job.pop(job_id, None)
+        self._publish_queue_metrics()
 
     async def cancel(self, job_id: str) -> ImageJob | None:
         """Cancel one queued/running job and leave an honest terminal status."""
@@ -176,11 +204,19 @@ class ImageJobManager:
                 return None
             if job.status in {"completed", "failed"}:
                 return job
+            phase = job.status
             job.status = "failed"
             job.error = "이미지 생성 작업이 취소되었습니다."
             job.updated_at = time.time()
             task = self._task_by_job.get(job_id)
             self._persist_state()
+            self._record_phase_outcome(job, phase, "cancelled")
+            self._metrics.record_image_job(
+                kind=job.kind,
+                quality=job.quality,
+                outcome="cancelled",
+            )
+            self._publish_queue_metrics()
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -191,12 +227,22 @@ class ImageJobManager:
         async with self._lock:
             tasks = tuple(self._tasks)
             now = time.time()
+            interrupted: list[tuple[ImageJob, JobStatus]] = []
             for job_id, task in self._task_by_job.items():
                 if not task.done() and (job := self._jobs.get(job_id)) is not None:
+                    interrupted.append((job, job.status))
                     job.status = "failed"
                     job.error = "서버 종료로 이미지 생성 작업이 중단되었습니다."
                     job.updated_at = now
             self._persist_state()
+            for job, phase in interrupted:
+                self._record_phase_outcome(job, phase, "cancelled")
+                self._metrics.record_image_job(
+                    kind=job.kind,
+                    quality=job.quality,
+                    outcome="interrupted",
+                )
+            self._publish_queue_metrics()
         for task in tasks:
             task.cancel()
         if tasks:
@@ -208,17 +254,40 @@ class ImageJobManager:
 
     async def stats(self) -> dict[str, int]:
         async with self._lock:
-            active = [
-                job for job in self._jobs.values() if job.status not in {"completed", "failed"}
-            ]
-            return {
-                "active_jobs": len(active),
-                "active_work_units": sum(self._work_units(job.quality) for job in active),
-                "max_jobs": self._env_int("TERRA_IMAGE_MAX_ACTIVE_JOBS", 3, 1, 32),
-                "max_work_units": self._env_int(
-                    "TERRA_IMAGE_MAX_WORK_UNITS", 8, 1, 128
-                ),
-            }
+            result = self._queue_stats_unlocked()
+            self._metrics.set_image_queue(**result)
+            return result
+
+    def _queue_stats_unlocked(self) -> dict[str, int]:
+        active = [
+            job for job in self._jobs.values() if job.status not in {"completed", "failed"}
+        ]
+        return {
+            "active_jobs": len(active),
+            "active_work_units": sum(self._work_units(job.quality) for job in active),
+            "max_jobs": self._env_int("TERRA_IMAGE_MAX_ACTIVE_JOBS", 3, 1, 32),
+            "max_work_units": self._env_int(
+                "TERRA_IMAGE_MAX_WORK_UNITS", 8, 1, 128
+            ),
+        }
+
+    def _publish_queue_metrics(self) -> None:
+        self._metrics.set_image_queue(**self._queue_stats_unlocked())
+
+    def _record_phase_outcome(
+        self,
+        job: ImageJob,
+        phase: JobStatus,
+        outcome: Literal["succeeded", "failed", "cancelled"],
+    ) -> None:
+        if phase in {"completed", "failed"}:
+            return
+        self._metrics.record_image_phase(
+            kind=job.kind,
+            quality=job.quality,
+            phase=phase,
+            outcome=outcome,
+        )
 
     @staticmethod
     def _work_units(quality: str) -> int:
@@ -289,15 +358,31 @@ class ImageJobManager:
         spec: PlanetSpec,
         inhabitant_index: int | None,
     ) -> None:
+        # The persisted/public job ID behaves like a cancellation capability, so
+        # logs receive only a keyed process-local digest of it.
+        with job_correlation(job_id):
+            await self._run_correlated(
+                job_id,
+                prompt,
+                negative_prompt,
+                spec,
+                inhabitant_index,
+            )
+
+    async def _run_correlated(
+        self,
+        job_id: str,
+        prompt: str,
+        negative_prompt: str,
+        spec: PlanetSpec,
+        inhabitant_index: int | None,
+    ) -> None:
         job = self._jobs[job_id]
         generated_urls: list[str] = []
+        current_phase_outcome: Literal["succeeded", "failed", "cancelled"] = "succeeded"
 
         async def mark_generating() -> None:
-            async with self._lock:
-                job.status = "generating"
-                job.candidate_current = 1
-                job.updated_at = time.time()
-                self._persist_state()
+            await self._set_phase(job, "generating", candidate_current=1)
 
         try:
             config = get_pipeline_config(job.quality)
@@ -428,6 +513,7 @@ class ImageJobManager:
                     # 후보 생성까지 성공했으므로 선택적 보정 실패로 전체 작업을 버리지 않는다.
                     log.warning("winner refinement skipped: %s", exc)
                     job.verification_notes.append("세부 보정에 실패해 검수된 원본 후보를 유지했습니다.")
+                    current_phase_outcome = "failed"
                 else:
                     refined_url, refined_seed = refined[0]
                     generated_urls.append(refined_url)
@@ -449,6 +535,7 @@ class ImageJobManager:
                     except Exception as exc:
                         log.warning("refined image verification failed: %s", exc)
                         job.verification_notes.append("보정 이미지 자동 검수를 사용할 수 없었습니다.")
+                        current_phase_outcome = "failed"
                     else:
                         if refined_verification.verified:
                             if (
@@ -466,46 +553,90 @@ class ImageJobManager:
                         final_url, final_seed = refined_url, refined_seed
 
             if config.upscale_winner:
-                upscaled_url = await self._upscale_if_configured(job, final_url)
+                upscaled_url, upscale_outcome = await self._upscale_if_configured(
+                    job,
+                    final_url,
+                    previous_outcome=current_phase_outcome,
+                )
+                if upscale_outcome is not None:
+                    current_phase_outcome = upscale_outcome
                 if upscaled_url is not None:
                     generated_urls.append(upscaled_url)
                     final_url = upscaled_url
 
             self._cleanup_generated(generated_urls, keep=final_url)
         except ImageGenerationError as exc:
-            log.warning("image job %s failed: %s", job.id, exc)
+            log.warning(
+                "image job %s failed: %s",
+                correlation_fields()["job_correlation_id"],
+                exc,
+            )
             self._cleanup_generated(generated_urls, keep="")
             async with self._lock:
+                failed_phase = job.status
                 job.status = "failed"
                 job.error = self._public_failure_message(exc)
                 job.updated_at = time.time()
                 self._persist_state()
+                self._record_phase_outcome(job, failed_phase, "failed")
+                self._metrics.record_image_job(
+                    kind=job.kind,
+                    quality=job.quality,
+                    outcome="failed",
+                )
+                self._publish_queue_metrics()
             return
         except asyncio.CancelledError:
             self._cleanup_generated(generated_urls, keep="")
             async with self._lock:
+                cancelled_phase = job.status
+                already_terminal = job.status in {"completed", "failed"}
                 job.status = "failed"
                 job.error = job.error or "이미지 생성 작업이 취소되었습니다."
                 job.updated_at = time.time()
                 self._persist_state()
+                if not already_terminal:
+                    self._record_phase_outcome(job, cancelled_phase, "cancelled")
+                    self._metrics.record_image_job(
+                        kind=job.kind,
+                        quality=job.quality,
+                        outcome="cancelled",
+                    )
+                self._publish_queue_metrics()
             raise
         except Exception as exc:  # 작업이 조용히 유실되지 않도록 상태로 전달
             log.exception("unexpected image job failure")
             self._cleanup_generated(generated_urls, keep="")
             async with self._lock:
+                failed_phase = job.status
                 job.status = "failed"
                 job.error = "이미지 생성 중 내부 오류가 발생했습니다."
                 job.updated_at = time.time()
                 self._persist_state()
+                self._record_phase_outcome(job, failed_phase, "failed")
+                self._metrics.record_image_job(
+                    kind=job.kind,
+                    quality=job.quality,
+                    outcome="failed",
+                )
+                self._publish_queue_metrics()
             return
 
         async with self._lock:
+            completed_phase = job.status
             job.status = "completed"
             job.candidate_current = job.candidate_total
             job.url = final_url
             job.actual_seed = final_seed
             job.updated_at = time.time()
             self._persist_state()
+            self._record_phase_outcome(job, completed_phase, current_phase_outcome)
+            self._metrics.record_image_job(
+                kind=job.kind,
+                quality=job.quality,
+                outcome="completed",
+            )
+            self._publish_queue_metrics()
 
     async def _set_phase(
         self,
@@ -513,13 +644,17 @@ class ImageJobManager:
         phase: JobStatus,
         *,
         candidate_current: int | None = None,
+        previous_outcome: Literal["succeeded", "failed", "cancelled"] = "succeeded",
     ) -> None:
         async with self._lock:
+            previous_phase = job.status
             job.status = phase
             if candidate_current is not None:
                 job.candidate_current = candidate_current
             job.updated_at = time.time()
             self._persist_state()
+            if previous_phase != phase:
+                self._record_phase_outcome(job, previous_phase, previous_outcome)
 
     @staticmethod
     def _generated_path(url: str) -> Path:
@@ -539,7 +674,13 @@ class ImageJobManager:
             return "이미지 생성 시간이 초과되었습니다. 빠른 모드로 다시 시도해 주세요."
         return "이미지 생성기가 작업을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
 
-    async def _upscale_if_configured(self, job: ImageJob, source_url: str) -> str | None:
+    async def _upscale_if_configured(
+        self,
+        job: ImageJob,
+        source_url: str,
+        *,
+        previous_outcome: Literal["succeeded", "failed", "cancelled"] = "succeeded",
+    ) -> tuple[str | None, Literal["succeeded", "failed"] | None]:
         source = self._generated_path(source_url)
         output = GENERATED_DIR / f"{source.stem}-upscaled.png"
         try:
@@ -548,10 +689,10 @@ class ImageJobManager:
             # 잘못된 업스케일러 설정으로 이미 성공한 작업을 실패시키지 않는다 — 선택적 단계일 뿐이다.
             log.warning("optional upscaler configuration rejected: %s", exc)
             job.verification_notes.append("선택적 업스케일 설정 오류로 원본을 유지했습니다.")
-            return None
+            return None, None
         if command is None:
-            return None
-        await self._set_phase(job, "upscaling")
+            return None, None
+        await self._set_phase(job, "upscaling", previous_outcome=previous_outcome)
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -574,14 +715,14 @@ class ImageJobManager:
             self._unlink_quietly(output)
             log.warning("optional upscaler skipped: %s", exc)
             job.verification_notes.append("선택적 업스케일을 완료하지 못해 원본을 유지했습니다.")
-            return None
+            return None, "failed"
         if process.returncode != 0 or not output.is_file():
             detail = (stderr or stdout).decode("utf-8", errors="replace")[-240:]
             log.warning("optional upscaler failed: %s", detail or process.returncode)
             job.verification_notes.append("선택적 업스케일에 실패해 원본을 유지했습니다.")
             self._unlink_quietly(output)
-            return None
-        return f"/generated/{output.name}"
+            return None, "failed"
+        return f"/generated/{output.name}", "succeeded"
 
     @staticmethod
     def _upscale_timeout() -> int:

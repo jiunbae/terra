@@ -18,6 +18,21 @@ if [[ -f "$ROOT/.env.local" ]]; then
   set +a
 fi
 
+# Metrics scraping uses a dedicated local secret file so the token is neither
+# committed nor embedded in a world-readable LaunchAgent plist.
+if [[ -z "${TERRA_METRICS_TOKEN:-}" && -n "${TERRA_METRICS_TOKEN_FILE:-}" ]]; then
+  if [[ ! -r "$TERRA_METRICS_TOKEN_FILE" ]]; then
+    print -u2 "TERRA_METRICS_TOKEN_FILE is not readable"
+    exit 1
+  fi
+  TERRA_METRICS_TOKEN="$(tr -d '\r\n' < "$TERRA_METRICS_TOKEN_FILE")"
+  if [[ ${#TERRA_METRICS_TOKEN} -lt 32 ]]; then
+    print -u2 "TERRA_METRICS_TOKEN_FILE must contain at least 32 characters"
+    exit 1
+  fi
+  export TERRA_METRICS_TOKEN
+fi
+
 if [[ -f "$HOME/.bw_session" ]]; then
   BW_SESSION="$(tr -d '\n' < "$HOME/.bw_session")"
   export BW_SESSION
@@ -33,7 +48,14 @@ unset BW_SESSION
 
 if [[ "$MODE" == "--production" ]]; then
   export TERRA_ENV="${TERRA_ENV:-production}"
-  "$ROOT/scripts/build_frontend_atomic.sh"
+  if [[ "${TERRA_SKIP_FRONTEND_BUILD:-0}" == "1" ]]; then
+    if [[ ! -f "$ROOT/frontend/dist/index.html" ]]; then
+      print -u2 "TERRA_SKIP_FRONTEND_BUILD=1 but frontend/dist/index.html is missing"
+      exit 1
+    fi
+  else
+    "$ROOT/scripts/build_frontend_atomic.sh"
+  fi
   cd "$ROOT/backend"
   # 이미지 작업 큐와 MLX 모델 잠금은 프로세스 내부 상태이므로 반드시 단일 worker로 실행한다.
   exec uv run uvicorn app.main:app \
@@ -41,6 +63,7 @@ if [[ "$MODE" == "--production" ]]; then
     --port "${PORT:-8787}" \
     --workers 1 \
     --no-server-header \
+    --no-access-log \
     --forwarded-allow-ips "${TERRA_FORWARDED_ALLOW_IPS:-127.0.0.1}" \
     --limit-concurrency "${TERRA_HTTP_CONCURRENCY:-128}" \
     --backlog "${TERRA_HTTP_BACKLOG:-128}" \

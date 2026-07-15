@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from app.image_jobs import ImageJobManager
 from app.image_verifier import CriterionScores, ImageVerificationResult
 from app.images import ImageGenerationError
+from app.observability import TerraMetrics
 from app.schema import Inhabitant, PlanetSpec
 
 
@@ -191,7 +192,8 @@ class ImageJobPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(list(self.generated.glob("*.png"))), 1)
 
     async def test_quality_mode_survives_optional_refinement_failure(self) -> None:
-        manager = ImageJobManager()
+        telemetry = TerraMetrics()
+        manager = ImageJobManager(telemetry=telemetry)
         first_batch = self._batch()
         calls = 0
 
@@ -223,6 +225,49 @@ class ImageJobPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "completed")
         self.assertEqual(job.quality_score, 91)
         self.assertTrue(any("보정에 실패" in note for note in job.verification_notes))
+        rendered = telemetry.prometheus_text()
+        self.assertIn('phase="refining",outcome="failed"} 1', rendered)
+        self.assertNotIn('phase="refining",outcome="succeeded"} 1', rendered)
+
+    async def test_quality_mode_records_optional_upscaler_failure_without_failing_job(self) -> None:
+        telemetry = TerraMetrics()
+        manager = ImageJobManager(telemetry=telemetry)
+        batch = self._batch()
+        verifier = AsyncMock(
+            side_effect=[_verification(70), _verification(91), _verification(80), _verification(94)]
+        )
+
+        class FailedUpscaler:
+            returncode = 1
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b"upscaler failed"
+
+        with (
+            patch("app.image_jobs.GENERATED_DIR", self.generated),
+            patch("app.image_jobs.generate_candidate_batch", batch),
+            patch("app.image_jobs.verify_generated_image", new=verifier),
+            patch("app.image_jobs.build_upscaler_command", return_value=["fake-upscaler"]),
+            patch(
+                "app.image_jobs.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=FailedUpscaler()),
+            ),
+        ):
+            job = await manager.create(
+                prompt="test",
+                negative_prompt="",
+                spec=self.spec,
+                kind="surface",
+                seed=33,
+                quality="quality",
+            )
+            await self._wait(manager)
+
+        self.assertEqual(job.status, "completed")
+        self.assertTrue(any("업스케일에 실패" in note for note in job.verification_notes))
+        rendered = telemetry.prometheus_text()
+        self.assertIn('phase="upscaling",outcome="failed"} 1', rendered)
+        self.assertNotIn('phase="upscaling",outcome="succeeded"} 1', rendered)
 
 
 if __name__ == "__main__":

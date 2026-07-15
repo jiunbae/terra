@@ -25,7 +25,7 @@ class ContentLengthLimitMiddleware:
         self.max_bytes = max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("method") in {"POST", "PUT", "PATCH"}:
+        if scope["type"] == "http" and scope.get("method") in {"POST", "PUT", "PATCH", "DELETE"}:
             raw_length = dict(scope.get("headers", [])).get(b"content-length")
             if raw_length is not None:
                 try:

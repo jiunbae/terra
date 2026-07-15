@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import colorsys
 import os
+import re
 import secrets
 import shutil
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ class ImageProviderStatus:
     model: str
     command: str
     message: str
+    model_argument: str | None = None
 
 
 def _command_name() -> str:
@@ -63,23 +65,69 @@ def _command_name() -> str:
 def provider_status() -> ImageProviderStatus:
     command = _command_name()
     executable = shutil.which(command)
+    model_name = os.environ.get("TERRA_IMAGE_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    revision = os.environ.get("TERRA_IMAGE_MODEL_REVISION", "").strip()
+    model_label = f"{model_name}@{revision}" if revision else model_name
+    configured_path = os.environ.get("TERRA_IMAGE_MODEL_PATH", "").strip()
+    model_argument = configured_path or model_name
+    if revision and re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        return ImageProviderStatus(
+            available=False,
+            provider="mflux",
+            model=model_label,
+            command=executable or command,
+            message="이미지 모델 revision은 전체 40자리 commit SHA여야 합니다.",
+            model_argument=model_argument,
+        )
+    if revision and not configured_path:
+        return ImageProviderStatus(
+            available=False,
+            provider="mflux",
+            model=model_label,
+            command=executable or command,
+            message="고정 revision에는 해당 로컬 이미지 모델 경로가 필요합니다.",
+            model_argument=model_argument,
+        )
+    if configured_path:
+        resolved = Path(configured_path).expanduser().resolve()
+        if not resolved.is_dir():
+            return ImageProviderStatus(
+                available=False,
+                provider="mflux",
+                model=model_label,
+                command=executable or command,
+                message="고정된 로컬 이미지 모델 경로를 찾을 수 없습니다.",
+                model_argument=str(resolved),
+            )
+        if revision and resolved.name != revision:
+            return ImageProviderStatus(
+                available=False,
+                provider="mflux",
+                model=model_label,
+                command=executable or command,
+                message="로컬 이미지 모델 revision이 설정과 일치하지 않습니다.",
+                model_argument=str(resolved),
+            )
+        model_argument = str(resolved)
     if executable:
         return ImageProviderStatus(
             available=True,
             provider="mflux",
-            model=os.environ.get("TERRA_IMAGE_MODEL", DEFAULT_MODEL),
+            model=model_label,
             command=executable,
             message="Apple Silicon 로컬 이미지 생성 준비 완료",
+            model_argument=model_argument,
         )
     return ImageProviderStatus(
         available=False,
         provider="mflux",
-        model=os.environ.get("TERRA_IMAGE_MODEL", DEFAULT_MODEL),
+        model=model_label,
         command=command,
         message=(
-            "mflux가 설치되지 않았습니다. `uv tool install --upgrade mflux` 후 "
+            "mflux가 설치되지 않았습니다. `uv tool install mflux==0.18.0` 후 "
             "백엔드를 다시 시작하면 이미지 생성이 활성화됩니다."
         ),
+        model_argument=model_argument,
     )
 
 
@@ -436,7 +484,7 @@ async def generate_candidate_batch(
     args = [
         status.command,
         "--model",
-        status.model,
+        status.model_argument or status.model,
         "--prompt",
         prompt,
         "--width",

@@ -6,6 +6,7 @@ import type {
   ImageProviderStatus,
   ImageQuality,
   PlanetSpec,
+  ReportReason,
   SavedPlanet,
   SavedPlanetSummary,
 } from './types'
@@ -274,6 +275,67 @@ export async function updateSavedImage(
     signal,
   }, 20_000, '생성 이미지 연결이 지연되고 있습니다.')
   if (!res.ok) throw await apiError(res, '생성 이미지 연결 실패')
+}
+
+export async function deleteSavedPlanet(id: string, editToken: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/api/planets/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edit_token: editToken }),
+    cache: 'no-store',
+  }, 20_000, '공개 행성 삭제가 지연되고 있습니다.')
+  if (!res.ok) throw await apiError(res, '공개 행성 삭제 실패')
+}
+
+export async function reportSavedPlanet(
+  id: string,
+  reason: ReportReason,
+  details: string,
+): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/api/planets/${encodeURIComponent(id)}/reports`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason, details }),
+    cache: 'no-store',
+  }, 20_000, '신고 접수가 지연되고 있습니다.')
+  if (!res.ok) throw await apiError(res, '신고 접수 실패')
+}
+
+export function downloadPlanetJson(
+  analysis: AnalyzeResponse,
+  images: Record<string, GeneratedImage>,
+): void {
+  // 서버나 localStorage를 거치지 않는 로컬 내보내기다. 편집 capability는
+  // payload에 포함하지 않고, 이미지 URL도 Terra 내부 상대 경로로 정규화한다.
+  const payload = {
+    format: 'terra-world',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    analysis,
+    image_assets: Object.fromEntries(
+      Object.entries(images).map(([key, image]) => [
+        key,
+        { ...image, url: assetPath(image.url) },
+      ]),
+    ),
+  }
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+    type: 'application/json;charset=utf-8',
+  })
+  const objectUrl = URL.createObjectURL(blob)
+  const safeName = analysis.spec.planet.name
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, 80) || 'terra-world'
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = `${safeName}.terra.json`
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000)
 }
 
 export const SAMPLE_TEXT = `칼리페른의 하늘은 언제나 연보랏빛이었다. 두 개의 태양 — 늙고 붉은 카르와 어리고 하얀 벨 — 이 지평선 위에서 서로를 쫓았고, 그 빛이 짙은 대기를 통과하며 보라색으로 부서졌다. 이 행성의 하루는 고작 여섯 시간. 미친 듯이 도는 자전 때문에 행성 자체가 눈에 띄게 납작했고, 적도의 바람은 결코 멈추는 법이 없었다.

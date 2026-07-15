@@ -22,7 +22,7 @@ body { background: var(--bg); color: var(--text); }
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
-button:focus-visible, textarea:focus-visible, summary:focus-visible {
+button:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
   outline: 2px solid #a9baff; outline-offset: 2px;
 }
 .scene-container { position: absolute; inset: 0; }
@@ -255,16 +255,48 @@ button.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--acce
 .inline-retry { margin-top: 7px; padding: 5px 8px; }
 
 /* ── 저장 / 공유 */
-.share-actions { display: flex; align-items: center; gap: 8px; }
+.share-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .archive-save, .archive-share {
   border: 1px solid rgba(124, 155, 255, 0.34); border-radius: 9px;
   background: rgba(77, 99, 190, 0.2); color: #cad5ff;
   padding: 8px 12px; font: 700 12px inherit; cursor: pointer;
 }
-.archive-save { width: 100%; }
+.archive-save { flex: 1 1 180px; }
 .archive-save:hover:not(:disabled), .archive-share:hover { background: rgba(91, 116, 220, 0.32); }
 .archive-save:disabled { opacity: 0.5; cursor: default; }
-.archive-saved { flex: 1; color: var(--green); font-size: 12px; }
+.archive-saved { flex: 1 1 110px; color: var(--green); font-size: 12px; }
+.archive-privacy { color: var(--text-dim); font-size: 10.5px; line-height: 1.5; }
+.archive-management { display: flex; justify-content: flex-end; gap: 7px; }
+.archive-report, .archive-delete, .report-form-actions button {
+  border: 1px solid var(--panel-border); border-radius: 7px; padding: 6px 9px;
+  background: transparent; color: var(--text-dim); font: 600 11px inherit; cursor: pointer;
+}
+.archive-report:hover { color: var(--text); border-color: var(--accent); }
+.archive-delete { color: #d99595; border-color: rgba(230, 110, 110, 0.25); }
+.archive-delete:hover:not(:disabled) { color: #ffb0b0; border-color: rgba(255, 130, 130, 0.55); }
+.archive-delete:disabled { cursor: default; opacity: 0.5; }
+.report-form {
+  display: flex; flex-direction: column; gap: 7px; padding: 10px; border-radius: 9px;
+  border: 1px solid rgba(124, 155, 255, 0.2); background: rgba(15, 20, 38, 0.62);
+}
+.report-form label {
+  display: flex; justify-content: space-between; gap: 8px; color: #b9c4e8;
+  font-size: 11px; font-weight: 650;
+}
+.report-form label span { color: var(--text-dim); font-weight: 400; }
+.report-form select, .report-form textarea {
+  width: 100%; border: 1px solid var(--panel-border); border-radius: 7px;
+  background: rgba(4, 6, 16, 0.75); color: var(--text); padding: 8px;
+  font-family: inherit; font-size: 12px; line-height: 1.5;
+}
+.report-form textarea { resize: vertical; min-height: 72px; }
+.report-form-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.report-form-actions button { padding: 6px 10px; }
+.report-form-actions button[type='submit'] {
+  color: #d5deff; border-color: rgba(124, 155, 255, 0.38); background: rgba(77, 99, 190, 0.2);
+}
+.report-form-actions button:disabled { cursor: default; opacity: 0.5; }
+.image-note.report-success { color: var(--green); }
 
 /* ── 공개 행성 갤러리 */
 .gallery-panel { display: flex; flex-direction: column; gap: 14px; }

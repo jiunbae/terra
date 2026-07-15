@@ -48,7 +48,7 @@ Terra reads a long fictional description, separates stated facts from physically
 - **Distinct visual identities** — continents, archipelagos, craters, canyons, dunes, crystalline fields, volcanic provinces, and engineered terrain use different geometry and material logic.
 - **Local generative art** — MFLUX on Apple Silicon creates orbital art, ground-level environments, and full-body inhabitant portraits.
 - **Visual continuity** — a locked World Visual Bible keeps palette, atmosphere, terrain, landmarks, and species anatomy consistent across images.
-- **Shareable worlds** — SQLite-backed gallery entries preserve the structured spec, derived physics, cover art, quality score, and stable share URL.
+- **Shareable worlds** — SQLite-backed gallery entries preserve the structured spec, derived physics, cover art, quality score, and stable share URL, with local JSON export and capability-authorized deletion.
 
 ## Image quality pipeline
 
@@ -126,7 +126,7 @@ make install-images
 ./start.sh
 ```
 
-The default profile pins MFLUX 0.18.0 and uses the pre-quantized `filipstrand/Z-Image-Turbo-mflux-4bit` model at its distilled 9-step setting. The first run downloads or loads several gigabytes of weights, so it can take a few minutes.
+The default profile pins MFLUX 0.18.0 and uses the pre-quantized `filipstrand/Z-Image-Turbo-mflux-4bit` model at its distilled 9-step setting. The first run downloads or loads several gigabytes of weights, so it can take a few minutes. Production can additionally pin a full Hugging Face snapshot commit and local path with `TERRA_IMAGE_MODEL_REVISION`, `TERRA_IMAGE_MODEL_PATH`, and `HF_HUB_OFFLINE=1`.
 
 Useful configuration lives in [`.env.example`](.env.example), including image dimensions, generation timeout, guide strength, request limits, and the optional external upscaler command.
 
@@ -135,19 +135,21 @@ Useful configuration lives in [`.env.example`](.env.example), including image di
 ```bash
 make test                    # frontend production build + backend tests
 npm --prefix frontend run lint
+npm --prefix frontend run test:e2e  # mocked API + real Chromium/WebGL smoke suite
 ```
 
 The image pipeline is designed so its selection and orchestration behavior can be tested without loading the generative model. Live MFLUX and Gemini calls remain optional integration checks.
 
 ## Privacy and deployment notes
 
-- Gallery saves the structured world specification and derived physics, **not the complete source story**.
+- Gallery saves the structured world specification and derived physics, **not the complete source story**; new public saves omit direct evidence quotes while the local report/export remains complete.
+- Public worlds can be reported through a bounded moderation intake, and the browser holding the anonymous edit capability can delete its public record.
 - `.env`, local databases, generated images, model weights, caches, and editor state are excluded from Git.
 - Generated PNGs referenced by saved planets are retained; unreferenced files expire after a configurable TTL and are reclaimed under disk pressure.
 - The included rate limits are suitable for a small public demo, not a substitute for account-level quotas and authentication in a large deployment.
 - MFLUX is Apple Silicon-specific; the analysis, 3D client, API, and tests can run without it.
 
-For the loopback-only macOS LaunchAgent, Cloudflare Tunnel ingress, verified SQLite/image backup, restore drill, log policy, and rollback procedure, see [`deploy/README.md`](deploy/README.md).
+For the private-origin macOS LaunchAgent, ingress, authenticated metrics, verified SQLite/image backup, restore drill, log policy, and rollback procedure, see [`deploy/README.md`](deploy/README.md).
 
 ## License
 

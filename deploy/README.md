@@ -1,12 +1,16 @@
 # Terra production operations
 
 This directory contains a macOS `launchd` LaunchAgent template for the single-host Terra deployment.
-The application remains bound to `127.0.0.1:8787`; Cloudflare Tunnel is the only intended public ingress.
+The default origin is `127.0.0.1:8787`; a host-specific ignored `.env.local` may instead select one private
+interface when an existing ingress proxy cannot reach loopback. Direct public access to port 8787 is unsupported.
 
 ## 1. Prerequisites
 
 - Use a dedicated, non-administrator macOS account for Terra when practical.
 - Install the locked frontend/backend dependencies and the pinned image-generation tool before deployment.
+- Pin production image generation to an audited Hugging Face snapshot with
+  `TERRA_IMAGE_MODEL_REVISION`, `TERRA_IMAGE_MODEL_PATH`, and `HF_HUB_OFFLINE=1`. Terra refuses to start image
+  work when the path is missing or its directory name does not match the full 40-character revision.
 - Keep the project checkout, `backend/data`, `backend/generated`, logs, and backups readable only by that account.
 - Configure Gemini credentials through the existing trusted secret helper or a mode-`0600` `.env`.
   The plist must remain free of credentials and secret-manager session values.
@@ -22,7 +26,19 @@ npm --prefix frontend run lint
 
 ## 2. Install the LaunchAgent
 
-Copy `com.jiun.terra.plist.template` to a temporary file and replace every placeholder:
+Build once before installing. Supervisor restarts intentionally reuse this verified static bundle instead of invoking
+Node/npm on every backend restart:
+
+```sh
+make test
+./scripts/build_frontend_atomic.sh
+./scripts/install_launchagent.sh
+```
+
+The installer renders the template atomically, creates a private log directory, validates the plist, and writes it as
+mode `0600`. It never stops or starts the service. Review the generated file before the first bootstrap.
+
+For a manual install, copy `com.jiun.terra.plist.template` to a temporary file and replace every placeholder:
 
 | Placeholder | Value |
 | --- | --- |
@@ -65,7 +81,7 @@ The template's `0077` umask prevents newly created DB, image, and log files from
 
 ```sh
 launchctl print "gui/$(id -u)/com.jiun.terra"
-curl --fail --silent --show-error http://127.0.0.1:8787/api/health
+curl --fail --silent --show-error http://127.0.0.1:8787/api/health # use the exact TERRA_HOST when overridden
 curl --fail --silent --show-error https://terra.jiun.dev/api/health
 ```
 
@@ -77,7 +93,7 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' https://terra.jiun
 lsof -nP -iTCP:8787 -sTCP:LISTEN
 ```
 
-Expected: `/docs` returns `404`; the listener is `127.0.0.1:8787`, not `*:8787`.
+Expected: `/docs` returns `404`; the listener is the single configured private origin address, never `*:8787`.
 
 ## 4. Backup
 
@@ -139,3 +155,12 @@ pointing the plist to the previous tested release, and bootstrapping it again; a
 The template separates stdout and stderr in `__LOG_DIR__`. Rotate these files with the host's normal log policy and alert
 on repeated restarts, HTTP 5xx, image-job failures, queue saturation, low disk space, and failed backups. Never log API
 keys, Vault sessions, request authorization capabilities, complete story text, or child-process environments.
+
+Every HTTP response receives a server-generated `X-Request-ID`; caller-supplied IDs are ignored. Process-local request,
+latency, queue, image phase, cleanup, readiness, and disk metrics are available at `/api/admin/metrics` only when a
+`TERRA_METRICS_TOKEN` of at least 32 characters was loaded. Keep the token in a private file and configure
+`TERRA_METRICS_TOKEN_FILE`; never put it in the plist, a query string, or a public dashboard. Scrapers must send it as a
+Bearer authorization header. With no configured token, the endpoint returns `404`.
+
+Production disables Uvicorn's raw access log because image job IDs are cancellation capabilities carried in URL paths.
+Use the bounded route-template metrics and correlation IDs for request operations instead of logging raw targets.

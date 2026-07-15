@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .observability import metrics
+
 _GENERATED_PNG = re.compile(r"^/generated/([^/?#]+\.png)$", re.IGNORECASE)
 _MEBIBYTE = 1024 * 1024
 
@@ -78,6 +80,12 @@ class GeneratedCleanupResult:
         value = asdict(self)
         value["deleted_count"] = self.deleted_count
         return value
+
+
+def _observed(result: GeneratedCleanupResult) -> GeneratedCleanupResult:
+    """Publish bounded health signals without retaining filenames or errors."""
+    metrics.record_cleanup(result)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,43 +241,47 @@ def cleanup_generated_images(
         directory = Path(generated_dir)
 
     if not directory.exists():
-        return GeneratedCleanupResult(
-            aborted=False,
-            scanned_pngs=0,
-            referenced_pngs=0,
-            protected_recent_pngs=0,
-            deleted_ttl=(),
-            deleted_pressure=(),
-            reclaimed_bytes=0,
-            store_bytes_before=0,
-            store_bytes_after=0,
-            free_bytes_before=None,
-            estimated_free_bytes_after=None,
-            pressure_was_active=False,
-            limits_satisfied=True,
-            errors=(),
-            elapsed_seconds=time.monotonic() - started,
+        return _observed(
+            GeneratedCleanupResult(
+                aborted=False,
+                scanned_pngs=0,
+                referenced_pngs=0,
+                protected_recent_pngs=0,
+                deleted_ttl=(),
+                deleted_pressure=(),
+                reclaimed_bytes=0,
+                store_bytes_before=0,
+                store_bytes_after=0,
+                free_bytes_before=None,
+                estimated_free_bytes_after=None,
+                pressure_was_active=False,
+                limits_satisfied=True,
+                errors=(),
+                elapsed_seconds=time.monotonic() - started,
+            )
         )
 
     try:
         references = load_referenced_generated_pngs(db_path)
     except ReferenceScanError as exc:
-        return GeneratedCleanupResult(
-            aborted=True,
-            scanned_pngs=0,
-            referenced_pngs=0,
-            protected_recent_pngs=0,
-            deleted_ttl=(),
-            deleted_pressure=(),
-            reclaimed_bytes=0,
-            store_bytes_before=0,
-            store_bytes_after=0,
-            free_bytes_before=None,
-            estimated_free_bytes_after=None,
-            pressure_was_active=False,
-            limits_satisfied=False,
-            errors=(str(exc),),
-            elapsed_seconds=time.monotonic() - started,
+        return _observed(
+            GeneratedCleanupResult(
+                aborted=True,
+                scanned_pngs=0,
+                referenced_pngs=0,
+                protected_recent_pngs=0,
+                deleted_ttl=(),
+                deleted_pressure=(),
+                reclaimed_bytes=0,
+                store_bytes_before=0,
+                store_bytes_after=0,
+                free_bytes_before=None,
+                estimated_free_bytes_after=None,
+                pressure_was_active=False,
+                limits_satisfied=False,
+                errors=(str(exc),),
+                elapsed_seconds=time.monotonic() - started,
+            )
         )
 
     files, errors = _scan_pngs(directory)
@@ -357,20 +369,22 @@ def cleanup_generated_images(
         or (estimated_free is not None and estimated_free >= selected_policy.min_free_bytes)
     )
 
-    return GeneratedCleanupResult(
-        aborted=False,
-        scanned_pngs=len(files),
-        referenced_pngs=referenced_present,
-        protected_recent_pngs=protected_recent,
-        deleted_ttl=tuple(deleted_ttl),
-        deleted_pressure=tuple(deleted_pressure),
-        reclaimed_bytes=reclaimed,
-        store_bytes_before=total_before,
-        store_bytes_after=remaining_bytes,
-        free_bytes_before=free_before,
-        estimated_free_bytes_after=estimated_free,
-        pressure_was_active=pressure_was_active,
-        limits_satisfied=capacity_satisfied and disk_satisfied,
-        errors=tuple(errors),
-        elapsed_seconds=time.monotonic() - started,
+    return _observed(
+        GeneratedCleanupResult(
+            aborted=False,
+            scanned_pngs=len(files),
+            referenced_pngs=referenced_present,
+            protected_recent_pngs=protected_recent,
+            deleted_ttl=tuple(deleted_ttl),
+            deleted_pressure=tuple(deleted_pressure),
+            reclaimed_bytes=reclaimed,
+            store_bytes_before=total_before,
+            store_bytes_after=remaining_bytes,
+            free_bytes_before=free_before,
+            estimated_free_bytes_after=estimated_free,
+            pressure_was_active=pressure_was_active,
+            limits_satisfied=capacity_satisfied and disk_satisfied,
+            errors=tuple(errors),
+            elapsed_seconds=time.monotonic() - started,
+        )
     )

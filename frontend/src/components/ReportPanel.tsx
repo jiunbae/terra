@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { useShallow } from 'zustand/react/shallow'
+import { downloadPlanetJson, reportSavedPlanet } from '../api'
 import { useTerra } from '../store'
-import type { AnalyzeResponse, Inference } from '../types'
+import type { AnalyzeResponse, Inference, ReportReason } from '../types'
 import GeneratedArtwork from './GeneratedArtwork'
 
 const SHAPE_KO: Record<string, string> = {
@@ -25,6 +27,15 @@ const FEATURE_KO: Record<string, string> = {
   crystalline: '결정질 지형',
   volcanic: '화산 지형',
   artificial: '행성 규모 인공구조',
+}
+
+const REPORT_REASON_KO: Record<ReportReason, string> = {
+  personal_information: '개인정보 노출',
+  copyright: '저작권·권리 침해',
+  harassment: '괴롭힘·혐오 표현',
+  unsafe_content: '유해하거나 부적절한 콘텐츠',
+  spam: '스팸·중복 콘텐츠',
+  other: '기타',
 }
 
 function fmt(n: number, digits = 1): string {
@@ -60,16 +71,36 @@ export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
   const p = spec.planet
   const s = spec.surface
   const pal = s.palette
-  const { savedPlanetId, savingPlanet, saveError, saveCurrentPlanet } = useTerra(
+  const {
+    savedPlanetId,
+    savedEditToken,
+    savingPlanet,
+    deletingPlanet,
+    saveError,
+    images,
+    saveCurrentPlanet,
+    deleteCurrentPlanet,
+  } = useTerra(
     useShallow((state) => ({
       savedPlanetId: state.savedPlanetId,
+      savedEditToken: state.savedEditToken,
       savingPlanet: state.savingPlanet,
+      deletingPlanet: state.deletingPlanet,
       saveError: state.saveError,
+      images: state.images,
       saveCurrentPlanet: state.saveCurrentPlanet,
+      deleteCurrentPlanet: state.deleteCurrentPlanet,
     })),
   )
   const [copied, setCopied] = useState(false)
   const [shareError, setShareError] = useState<string | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [reportOpen, setReportOpen] = useState(false)
+  const [reportReason, setReportReason] = useState<ReportReason>('personal_information')
+  const [reportDetails, setReportDetails] = useState('')
+  const [reporting, setReporting] = useState(false)
+  const [reportStatus, setReportStatus] = useState<string | null>(null)
+  const [reportError, setReportError] = useState<string | null>(null)
   const copiedTimer = useRef<number | null>(null)
   const shareUrl = savedPlanetId
     ? `${window.location.origin}/?planet=${encodeURIComponent(savedPlanetId)}`
@@ -97,6 +128,44 @@ export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
     }
   }
 
+  const exportJson = () => {
+    setExportError(null)
+    try {
+      downloadPlanetJson(data, images)
+    } catch {
+      setExportError('JSON 파일을 만들지 못했습니다. 브라우저 다운로드 설정을 확인해 주세요.')
+    }
+  }
+
+  const submitReport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!savedPlanetId || reporting) return
+    setReporting(true)
+    setReportError(null)
+    setReportStatus(null)
+    try {
+      await reportSavedPlanet(savedPlanetId, reportReason, reportDetails.trim())
+      setReportStatus('신고가 접수되었습니다. 검토 전까지 추가 개인정보는 보내지 마세요.')
+      setReportOpen(false)
+      setReportDetails('')
+    } catch (error) {
+      setReportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setReporting(false)
+    }
+  }
+
+  const removeFromGallery = async () => {
+    const confirmed = window.confirm(
+      '이 행성을 공개 갤러리에서 삭제할까요? 현재 탭의 분석은 남지만 공유 링크는 더 이상 열리지 않습니다.',
+    )
+    if (!confirmed) return
+    if (await deleteCurrentPlanet()) {
+      setReportOpen(false)
+      setReportStatus(null)
+    }
+  }
+
   return (
     <div className="report">
       <section>
@@ -113,9 +182,80 @@ export default function ReportPanel({ data }: { data: AnalyzeResponse }) {
               <button type="button" className="archive-share" onClick={share}>{copied ? '복사됨' : '공유'}</button>
             </>
           )}
+          <button type="button" className="archive-share" onClick={exportJson}>JSON 내보내기</button>
         </div>
+        <p className="archive-privacy">
+          JSON은 편집 권한 없이 현재 분석(로컬 근거 인용 포함)과 이미지 메타데이터만 저장합니다.
+          공개 갤러리 저장본에서는 원문 근거 인용을 제외합니다.
+        </p>
+        {savedPlanetId && (
+          <div className="archive-management">
+            <button
+              type="button"
+              className="archive-report"
+              onClick={() => {
+                setReportOpen((open) => !open)
+                setReportError(null)
+                setReportStatus(null)
+              }}
+              aria-expanded={reportOpen}
+            >
+              신고
+            </button>
+            {savedEditToken && (
+              <button
+                type="button"
+                className="archive-delete"
+                onClick={removeFromGallery}
+                disabled={deletingPlanet}
+                aria-busy={deletingPlanet}
+              >
+                {deletingPlanet ? '삭제 중…' : '공개본 삭제'}
+              </button>
+            )}
+          </div>
+        )}
+        {reportOpen && savedPlanetId && (
+          <form className="report-form" onSubmit={submitReport}>
+            <label htmlFor="report-reason">신고 사유</label>
+            <select
+              id="report-reason"
+              value={reportReason}
+              onChange={(event) => setReportReason(event.target.value as ReportReason)}
+            >
+              {(Object.entries(REPORT_REASON_KO) as Array<[ReportReason, string]>).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            <label htmlFor="report-details">
+              설명 <span>{reportReason === 'other' ? '필수' : '선택'} · {reportDetails.length}/500</span>
+            </label>
+            <textarea
+              id="report-details"
+              value={reportDetails}
+              onChange={(event) => setReportDetails(event.target.value)}
+              maxLength={500}
+              rows={3}
+              required={reportReason === 'other'}
+              placeholder="민감한 개인정보나 원문 전체를 붙여넣지 마세요."
+            />
+            <div className="report-form-actions">
+              <button type="button" className="ghost" onClick={() => setReportOpen(false)}>취소</button>
+              <button
+                type="submit"
+                disabled={reporting || (reportReason === 'other' && !reportDetails.trim())}
+                aria-busy={reporting}
+              >
+                {reporting ? '접수 중…' : '신고 접수'}
+              </button>
+            </div>
+          </form>
+        )}
         {saveError && <p className="image-note error-text" role="alert">{saveError}</p>}
         {shareError && <p className="image-note error-text" role="alert">{shareError}</p>}
+        {exportError && <p className="image-note error-text" role="alert">{exportError}</p>}
+        {reportError && <p className="image-note error-text" role="alert">{reportError}</p>}
+        {reportStatus && <p className="image-note report-success" role="status">{reportStatus}</p>}
         <GeneratedArtwork spec={spec} kind="planet" alt={`${p.name} 행성 콘셉트 아트`} />
         <dl>
           <dt>형태</dt>

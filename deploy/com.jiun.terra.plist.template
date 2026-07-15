@@ -25,6 +25,8 @@
     <string>production</string>
     <key>TERRA_HOST</key>
     <string>127.0.0.1</string>
+    <key>TERRA_SKIP_FRONTEND_BUILD</key>
+    <string>1</string>
     <key>PORT</key>
     <string>8787</string>
   </dict>
