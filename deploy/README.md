@@ -34,6 +34,16 @@ Copy `com.jiun.terra.plist.template` to a temporary file and replace every place
 The template intentionally contains no secret placeholders. Do not add secrets to `EnvironmentVariables`; plist files
 and process environments are routinely visible to local diagnostic tools.
 
+The template assumes `cloudflared` reaches Terra directly over loopback. If this host instead has a local ingress
+proxy that connects through a LAN interface, put only host-specific non-secret overrides in the ignored `.env.local`:
+
+```sh
+TERRA_HOST=192.0.2.10
+TERRA_FORWARDED_ALLOW_IPS=192.0.2.10
+```
+
+Use the actual single interface/proxy address, never `0.0.0.0`, and restrict that port at the host firewall.
+
 Install it as a per-user LaunchAgent so the Apple/MLX process runs in the intended user session:
 
 ```sh

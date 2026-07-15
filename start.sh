@@ -10,6 +10,14 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
+# 커밋하지 않는 호스트별 네트워크/프록시 설정은 기본 비밀 파일을 수정하지
+# 않고 .env.local에서 덮어쓸 수 있다.
+if [[ -f "$ROOT/.env.local" ]]; then
+  set -a
+  source "$ROOT/.env.local"
+  set +a
+fi
+
 if [[ -f "$HOME/.bw_session" ]]; then
   BW_SESSION="$(tr -d '\n' < "$HOME/.bw_session")"
   export BW_SESSION
