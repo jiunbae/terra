@@ -104,14 +104,28 @@ class ProductionHeadersMiddleware:
                     "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
                 )
                 headers.setdefault("cross-origin-opener-policy", "same-origin")
-                headers.setdefault("strict-transport-security", "max-age=31536000")
                 headers.setdefault(
-                    "content-security-policy",
-                    "default-src 'self'; base-uri 'self'; object-src 'none'; "
-                    "frame-ancestors 'none'; form-action 'self'; script-src 'self'; "
-                    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
-                    "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:",
+                    "strict-transport-security", "max-age=31536000; includeSubDomains"
                 )
+                # Swagger/ReDoc(개발 전용 — 프로덕션에서는 docs가 비활성)는 CDN 스크립트와
+                # 인라인 부트스트랩을 쓰므로 해당 경로에서만 CSP를 완화한다. 그 외 모든
+                # 응답은 엄격한 self 기반 정책을 유지한다.
+                if path in {"/docs", "/redoc"}:
+                    headers.setdefault(
+                        "content-security-policy",
+                        "default-src 'self'; object-src 'none'; frame-ancestors 'none'; "
+                        "img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; "
+                        "script-src 'self' 'unsafe-inline' https:; "
+                        "connect-src 'self' https:; worker-src 'self' blob:",
+                    )
+                else:
+                    headers.setdefault(
+                        "content-security-policy",
+                        "default-src 'self'; base-uri 'self'; object-src 'none'; "
+                        "frame-ancestors 'none'; form-action 'self'; script-src 'self'; "
+                        "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+                        "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:",
+                    )
 
                 if path.startswith(("/assets/", "/generated/")):
                     headers["cache-control"] = "public, max-age=31536000, immutable"

@@ -11,7 +11,7 @@ export default defineConfig({
     },
   },
   build: {
-    // 프로덕션 재배포는 dist.next에 먼저 완성한 뒤 디렉터리를 교체한다.
+    // 프로덕션 재배포는 새 릴리스 디렉터리에 빌드한 뒤 dist 심링크를 원자적으로 재지정한다.
     outDir: process.env.TERRA_BUILD_OUT_DIR || 'dist',
     // three 코어는 지연 로드되는 벤더 청크라 크기가 커도 초기 로드에 영향이 없다.
     chunkSizeWarningLimit: 800,

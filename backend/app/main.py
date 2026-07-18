@@ -349,8 +349,21 @@ async def liveness() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _admin_authorized(request: Request) -> bool:
+    """관리자용 베어러 토큰이 유효한지 확인한다(미설정이면 항상 False)."""
+    expected = os.environ.get("TERRA_METRICS_TOKEN", "").strip()
+    if len(expected) < 32:
+        return False
+    scheme, separator, supplied = request.headers.get("authorization", "").partition(" ")
+    return (
+        separator == " "
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(supplied, expected)
+    )
+
+
 @app.get("/api/readyz", include_in_schema=False)
-async def readiness(response: Response) -> dict[str, Any]:
+async def readiness(request: Request, response: Response) -> dict[str, Any]:
     """Deployment probe with safe, non-secret dependency diagnostics."""
     database_ready, queue = await asyncio.gather(
         asyncio.to_thread(healthcheck_database),
@@ -382,12 +395,15 @@ async def readiness(response: Response) -> dict[str, Any]:
     }
     observe_readiness(checks, free_disk_bytes=free_disk_bytes)
     response.status_code = 200 if ready else 503
-    return {
+    body: dict[str, Any] = {
         "status": "ready" if ready else "not_ready",
         "checks": checks,
-        "queue": queue,
-        "free_disk_mb": free_disk_mb,
     }
+    # 정확한 여유 디스크/큐 깊이는 인프라 정보이므로 관리자 토큰이 있을 때만 노출한다.
+    if _admin_authorized(request):
+        body["queue"] = queue
+        body["free_disk_mb"] = free_disk_mb
+    return body
 
 
 @app.get("/api/admin/metrics", include_in_schema=False)

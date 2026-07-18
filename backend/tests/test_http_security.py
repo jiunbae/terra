@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -19,7 +21,38 @@ class HttpSecurityTests(unittest.TestCase):
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["x-frame-options"], "DENY")
         self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+        # 엄격한 API CSP는 script를 self로만 제한한다.
+        self.assertIn("script-src 'self';", response.headers["content-security-policy"])
+        self.assertIn(
+            "includeSubDomains", response.headers["strict-transport-security"]
+        )
         self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_docs_csp_is_relaxed_for_swagger(self) -> None:
+        # docs는 개발 환경에서만 활성. 해당 경로에서만 CDN 스크립트를 허용한다.
+        response = self.client.get("/docs")
+        if response.status_code == 404:
+            self.skipTest("docs disabled in this environment")
+        self.assertIn(
+            "script-src 'self' 'unsafe-inline' https:",
+            response.headers["content-security-policy"],
+        )
+
+    def test_readyz_hides_infra_details_without_admin_token(self) -> None:
+        body = self.client.get("/api/readyz").json()
+        self.assertIn("status", body)
+        self.assertIn("checks", body)
+        self.assertNotIn("free_disk_mb", body)
+        self.assertNotIn("queue", body)
+
+    def test_readyz_exposes_infra_details_to_admin(self) -> None:
+        token = "x" * 40
+        with patch.dict(os.environ, {"TERRA_METRICS_TOKEN": token}):
+            body = self.client.get(
+                "/api/readyz", headers={"authorization": f"Bearer {token}"}
+            ).json()
+        self.assertIn("free_disk_mb", body)
+        self.assertIn("queue", body)
 
     def test_untrusted_host_is_rejected(self) -> None:
         response = self.client.get("/api/health", headers={"host": "attacker.invalid"})
