@@ -25,7 +25,8 @@ def _coerce_hex_color(value: Any) -> Any:
     중립 회색으로 대체해 다른 필드를 지킨다.
     """
     if not isinstance(value, str):
-        return value
+        # 비문자열(None/숫자/리스트 등)도 섹션 전체를 잃지 않도록 중립 회색으로 대체한다.
+        return "#888888"
     text = value.strip().lower()
     if text and not text.startswith("#"):
         text = "#" + text

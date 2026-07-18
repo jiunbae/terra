@@ -29,18 +29,31 @@ if [[ ! -f "$TARGET/index.html" ]]; then
   exit 1
 fi
 
-# 원자적 활성화: dist가 사라지는 창 없이 심링크만 새 릴리스로 재지정한다.
+# 원자적 활성화: 새 릴리스를 가리키는 임시 심링크를 만든 뒤 rename(2)으로 dist를
+# 덮어쓴다. rename은 원자적이고 대상 심링크를 역참조하지 않으므로 dist가 사라지는
+# 창이 없다. (macOS에는 `mv -T`가 없어 python os.replace로 rename을 직접 호출한다.)
 if [[ -d "$LINK" && ! -L "$LINK" ]]; then
-  # 과거 스킴이 남긴 실제 dist 디렉터리에서의 일회성 전환.
+  # 과거 스킴이 남긴 실제 dist 디렉터리에서의 일회성 전환(디렉터리는 심링크로 rename 불가).
   rm -rf "$LINK"
 fi
-ln -sfn "$REL_NAME" "$LINK"
+TMPLINK="$FRONTEND/.dist.$STAMP.lnk"
+python3 - "$REL_NAME" "$TMPLINK" "$LINK" <<'PY'
+import os, sys
+rel, tmp, link = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    os.remove(tmp)
+except FileNotFoundError:
+    pass
+os.symlink(rel, tmp)
+os.replace(tmp, link)  # rename(2): 원자적, 대상 심링크를 따라가지 않고 교체
+PY
 
 # 최근 KEEP개 릴리스만 남긴다(방금 활성화한 릴리스는 최신이라 항상 보존된다).
 # 롤백은 dist 심링크를 원하는 dist.releases/<타임스탬프>로 다시 걸면 된다.
+# (@) 플래그가 없으면 zsh가 배열 슬라이스를 한 단어로 합쳐 rm이 아무것도 못 지운다.
 releases=("$RELEASES"/*(/Nom))
 if (( ${#releases} > KEEP )); then
-  rm -rf "${releases[KEEP+1,-1]}"
+  rm -rf "${(@)releases[KEEP+1,-1]}"
 fi
 
 print "Frontend build activated: dist -> $REL_NAME"

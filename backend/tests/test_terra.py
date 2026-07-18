@@ -54,6 +54,15 @@ class SchemaBoundaryTests(unittest.TestCase):
         spec = PlanetSpec.model_validate({"atmosphere": {"color_hex": "#Fff"}})
         self.assertEqual(spec.atmosphere.color_hex, "#ffffff")
 
+    def test_non_string_color_is_coerced_not_section_dropping(self) -> None:
+        # 비문자열 색값(None/숫자/리스트)도 섹션 전체를 잃지 않도록 회색으로 보정한다.
+        for bad in (None, 123, ["#fff"]):
+            spec = PlanetSpec.model_validate(
+                {"atmosphere": {"color_hex": bad, "composition": "질소-메탄"}}
+            )
+            self.assertEqual(spec.atmosphere.color_hex, "#888888")
+            self.assertEqual(spec.atmosphere.composition, "질소-메탄")
+
     def test_oversized_collections_are_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             PlanetSpec.model_validate(

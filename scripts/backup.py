@@ -287,11 +287,16 @@ def prune_old_archives(output_dir: Path, keep: int, *, keep_path: Path | None = 
     """
     if keep <= 0:
         return []
-    archives = sorted(
-        (path for path in output_dir.glob(f"{ARCHIVE_PREFIX}-*.tar.gz") if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
+    # (path, mtime)를 한 번에 수집한다. 방금 성공한 백업 뒤에 실행되므로, 파일이
+    # 사라지는 경쟁 상태(TOCTOU)로 정렬 중 예외가 나 명령 전체가 실패하지 않게 한다.
+    candidates: list[tuple[float, Path]] = []
+    for path in output_dir.glob(f"{ARCHIVE_PREFIX}-*.tar.gz"):
+        try:
+            if path.is_file():
+                candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    archives = [path for _, path in sorted(candidates, reverse=True)]
     removed: list[Path] = []
     for index, archive in enumerate(archives):
         if index < keep or archive == keep_path:
