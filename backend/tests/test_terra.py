@@ -41,9 +41,20 @@ class PhysicsTests(unittest.TestCase):
 
 
 class SchemaBoundaryTests(unittest.TestCase):
-    def test_invalid_color_and_oversized_collections_are_rejected(self) -> None:
-        with self.assertRaises(ValidationError):
-            PlanetSpec.model_validate({"atmosphere": {"color_hex": "blue"}})
+    def test_invalid_color_is_coerced_not_section_dropping(self) -> None:
+        # 알 수 없는 색은 거부(→ 섹션 전체 유실) 대신 중립 회색으로 보정하고,
+        # 같은 섹션의 다른 필드는 보존한다.
+        spec = PlanetSpec.model_validate(
+            {"atmosphere": {"color_hex": "blue", "composition": "질소-메탄"}}
+        )
+        self.assertEqual(spec.atmosphere.color_hex, "#888888")
+        self.assertEqual(spec.atmosphere.composition, "질소-메탄")
+
+    def test_shorthand_hex_is_expanded(self) -> None:
+        spec = PlanetSpec.model_validate({"atmosphere": {"color_hex": "#Fff"}})
+        self.assertEqual(spec.atmosphere.color_hex, "#ffffff")
+
+    def test_oversized_collections_are_rejected(self) -> None:
         with self.assertRaises(ValidationError):
             PlanetSpec.model_validate(
                 {"climate": {"phenomena": [f"storm-{index}" for index in range(17)]}}

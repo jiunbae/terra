@@ -4,6 +4,7 @@ import InputPanel from './components/InputPanel'
 import ReportPanel from './components/ReportPanel'
 import GalleryPanel from './components/GalleryPanel'
 import SceneBoundary from './components/SceneBoundary'
+import PanelBoundary from './components/PanelBoundary'
 import { useTerra } from './store'
 
 // Three.js/R3F/drei 3D 엔진(번들의 대부분)을 별도 청크로 분리해 초기 로드에서 떼어낸다.
@@ -135,13 +136,15 @@ export default function App() {
             )}
           </nav>
           <div className="panel-body" id="terra-panel-content">
-            {effectiveTab === 'gallery' ? (
-              <GalleryPanel onOpen={() => setTab('report')} />
-            ) : effectiveTab === 'input' || !result ? (
-              <InputPanel />
-            ) : (
-              <ReportPanel data={result} />
-            )}
+            <PanelBoundary resetKey={effectiveTab} onReset={() => { reset(); setTab('input') }}>
+              {effectiveTab === 'gallery' ? (
+                <GalleryPanel onOpen={() => setTab('report')} />
+              ) : effectiveTab === 'input' || !result ? (
+                <InputPanel />
+              ) : (
+                <ReportPanel data={result} />
+              )}
+            </PanelBoundary>
           </div>
         </aside>
       )}

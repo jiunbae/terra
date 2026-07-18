@@ -329,9 +329,12 @@ def cleanup_generated_images(
         (item for item in files if item.name not in references),
         key=lambda item: (item.modified_at, item.name),
     )
-    for item in unreferenced:
-        if item.modified_at <= ttl_cutoff:
-            delete(item, deleted_ttl)
+    # ttl_hours <= 0은 max_store_bytes/min_free_bytes와 동일하게 "비활성화"로 취급한다.
+    # (max(ttl, grace)로 계산하면 0이 grace 창으로 붕괴해 오히려 대량 삭제된다.)
+    if selected_policy.ttl_hours > 0:
+        for item in unreferenced:
+            if item.modified_at <= ttl_cutoff:
+                delete(item, deleted_ttl)
 
     def under_pressure() -> bool:
         capacity = (

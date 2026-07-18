@@ -6,6 +6,7 @@ import contextlib
 import json
 import hashlib
 import hmac
+import logging
 import secrets
 import sqlite3
 from collections.abc import Iterator
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .schema import PlanetSpec
+
+log = logging.getLogger("terra.repository")
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DB_PATH = DATA_DIR / "terra.sqlite3"
@@ -137,22 +140,27 @@ def initialize() -> None:
             for row in db.execute(
                 "SELECT id, spec_json FROM planets WHERE is_public = 1"
             ).fetchall():
-                spec = json.loads(row["spec_json"])
-                if not isinstance(spec, dict):
-                    raise ValueError("saved public planet spec must be a JSON object")
-                inferences = spec.get("inferences", [])
-                if not isinstance(inferences, list):
-                    raise ValueError("saved public planet inferences must be a JSON array")
-                changed = False
-                for inference in inferences:
-                    if isinstance(inference, dict) and inference.get("evidence_quote"):
-                        inference["evidence_quote"] = ""
-                        changed = True
-                if changed:
-                    db.execute(
-                        "UPDATE planets SET spec_json = ? WHERE id = ?",
-                        (json.dumps(spec, ensure_ascii=False), row["id"]),
-                    )
+                # 손상된 행 하나가 전체 트랜잭션을 되돌려 마이그레이션이 영구 재실패
+                # (부팅 불가)하지 않도록 행 단위로 건너뛴다.
+                try:
+                    spec = json.loads(row["spec_json"])
+                    if not isinstance(spec, dict):
+                        raise ValueError("spec must be a JSON object")
+                    inferences = spec.get("inferences", [])
+                    if not isinstance(inferences, list):
+                        raise ValueError("inferences must be a JSON array")
+                    changed = False
+                    for inference in inferences:
+                        if isinstance(inference, dict) and inference.get("evidence_quote"):
+                            inference["evidence_quote"] = ""
+                            changed = True
+                    if changed:
+                        db.execute(
+                            "UPDATE planets SET spec_json = ? WHERE id = ?",
+                            (json.dumps(spec, ensure_ascii=False), row["id"]),
+                        )
+                except (ValueError, TypeError) as exc:
+                    log.warning("공개 spec 인용 재정리 건너뜀 planet_id=%s: %s", row["id"], exc)
             db.execute(
                 "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
                 (

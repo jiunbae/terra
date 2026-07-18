@@ -256,13 +256,14 @@ export const useTerra = create<TerraState>((set, get) => ({
     try {
       const gallery = await getGallery(signal)
       if (signal?.aborted || requestVersion !== galleryRequestVersion) return
-      set({ gallery, galleryLoading: false })
+      set({ gallery })
     } catch (e) {
       if (signal?.aborted || requestVersion !== galleryRequestVersion) return
-      set({
-        galleryLoading: false,
-        galleryError: e instanceof Error ? e.message : String(e),
-      })
+      set({ galleryError: e instanceof Error ? e.message : String(e) })
+    } finally {
+      // 최신 요청만 플래그를 내린다. 취소로 조기 return해도 stuck되지 않고,
+      // 더 새 요청이 진행 중이면 그 요청이 소유하므로 건드리지 않는다.
+      if (requestVersion === galleryRequestVersion) set({ galleryLoading: false })
     }
   },
   saveCurrentPlanet: async () => {

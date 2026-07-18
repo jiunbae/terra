@@ -8,15 +8,41 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+_HEX3 = re.compile(r"#[0-9a-f]{3}")
+_HEX6 = re.compile(r"#[0-9a-f]{6}")
+
+
+def _coerce_hex_color(value: Any) -> Any:
+    """LLM이 준 색 표기를 #rrggbb로 보정한다.
+
+    strict 패턴으로 하드 거부하면 색 하나 때문에 섹션 전체(_lenient_parse)가
+    기본값으로 버려지므로, 3자리 축약·공백·# 누락을 흡수하고 알 수 없는 값은
+    중립 회색으로 대체해 다른 필드를 지킨다.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip().lower()
+    if text and not text.startswith("#"):
+        text = "#" + text
+    if _HEX3.fullmatch(text):
+        text = "#" + "".join(channel * 2 for channel in text[1:])
+    if _HEX6.fullmatch(text):
+        return text
+    return "#888888"
+
 
 NameText = Annotated[str, Field(max_length=120)]
 ShortText = Annotated[str, Field(max_length=512)]
 LongText = Annotated[str, Field(max_length=4096)]
 PromptText = Annotated[str, Field(max_length=8192)]
-HexColor = Annotated[str, Field(max_length=7, pattern=r"^#[0-9a-fA-F]{6}$")]
+HexColor = Annotated[
+    str, BeforeValidator(_coerce_hex_color), Field(max_length=7, pattern=r"^#[0-9a-fA-F]{6}$")
+]
 
 
 class Planet(BaseModel):

@@ -316,8 +316,9 @@ def _safe_cover_url(value: str | None) -> str | None:
 def _safe_image_key(value: str, *, inhabitant_count: int | None = None) -> str:
     if value in {"planet", "surface"}:
         return value
-    if value.startswith("inhabitant:") and value[11:].isdigit():
-        index = int(value[11:])
+    suffix = value[11:]
+    if value.startswith("inhabitant:") and suffix.isascii() and suffix.isdigit():
+        index = int(suffix)
         if inhabitant_count is None or index < inhabitant_count:
             return value
     raise HTTPException(status_code=422, detail="올바르지 않은 이미지 자산 키입니다.")

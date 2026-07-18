@@ -503,7 +503,13 @@ class RequestObservabilityMiddleware:
             # ServerErrorMiddleware sits outside user middleware. Handling the
             # pre-response failure here preserves the generated correlation ID
             # while returning no internal exception details to the caller.
-            log.error("unhandled request failure exception_type=%s", type(exc).__name__)
+            # ServerErrorMiddleware가 이 미들웨어 바깥이라 여기서 응답을 대신 보내면
+            # uvicorn의 기본 트레이스백 로깅이 실행되지 않는다. exc_info로 스택을 직접 남긴다.
+            log.error(
+                "unhandled request failure exception_type=%s",
+                type(exc).__name__,
+                exc_info=exc,
+            )
             await JSONResponse(
                 {"detail": "서버 내부 오류가 발생했습니다."},
                 status_code=500,
