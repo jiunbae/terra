@@ -109,13 +109,17 @@ Choose a private output directory outside `frontend`, `backend/generated`, and a
 ```sh
 mkdir -p "$HOME/TerraBackups"
 chmod 700 "$HOME/TerraBackups"
-python3 scripts/backup.py create --output-dir "$HOME/TerraBackups"
+# --keep N (or env TERRA_BACKUP_KEEP) rotates out all but the newest N archives after a successful run.
+python3 scripts/backup.py create --output-dir "$HOME/TerraBackups" --keep 14
 python3 scripts/backup.py verify "$HOME/TerraBackups/terra-backup-YYYYMMDDTHHMMSSZ.tar.gz"
 ```
 
 The create command fails if a referenced PNG is absent or unsafe. `--allow-missing` is an explicit disaster-recovery
 escape hatch; archives made with it list omissions in `manifest.json` and should not be treated as complete backups.
-Copy verified archives to encrypted off-host storage and apply a documented retention policy. Periodically perform a
+Pruning runs only after the new archive is verified and never removes it; it matches only the `terra-backup-*.tar.gz`
+naming pattern, leaving partial and unrelated files untouched. `--keep 0` (the default) disables rotation. Because
+each run transiently stages a copy of every referenced PNG under the output directory, provision headroom for one extra
+backup's worth of images. Copy verified archives to encrypted off-host storage and apply a documented retention policy. Periodically perform a
 restore drill rather than assuming an archive is usable.
 
 ## 5. Restore drill

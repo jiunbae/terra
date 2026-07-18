@@ -278,6 +278,32 @@ def _next_archive_path(output_dir: Path, created_at: datetime) -> Path:
     raise BackupError("cannot allocate a unique backup archive name")
 
 
+def prune_old_archives(output_dir: Path, keep: int, *, keep_path: Path | None = None) -> list[Path]:
+    """가장 최신 `keep`개만 남기고 오래된 백업 아카이브를 제거한다.
+
+    keep <= 0이면 아무것도 지우지 않는다(로테이션 비활성화). 아카이브 명명 패턴에
+    정확히 맞는 파일만 대상으로 하고 `.partial`·스테이징·무관 파일은 건드리지 않으며,
+    방금 만든 아카이브(keep_path)는 항상 보존한다.
+    """
+    if keep <= 0:
+        return []
+    archives = sorted(
+        (path for path in output_dir.glob(f"{ARCHIVE_PREFIX}-*.tar.gz") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    removed: list[Path] = []
+    for index, archive in enumerate(archives):
+        if index < keep or archive == keep_path:
+            continue
+        try:
+            archive.unlink()
+            removed.append(archive)
+        except OSError as exc:
+            print(f"warning: could not prune {archive}: {exc}", file=sys.stderr)
+    return removed
+
+
 def _expected_archive_paths(manifest: dict[str, Any]) -> set[str]:
     database = manifest.get("database")
     images = manifest.get("images")
@@ -436,6 +462,13 @@ def _path(value: str) -> Path:
     return Path(value).expanduser()
 
 
+def _env_keep() -> int:
+    try:
+        return max(0, int(os.environ.get("TERRA_BACKUP_KEEP", "0")))
+    except ValueError:
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create or verify a Terra database and referenced-image backup archive."
@@ -450,6 +483,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing",
         action="store_true",
         help="archive a snapshot with missing references documented in the manifest (default: fail)",
+    )
+    create.add_argument(
+        "--keep",
+        type=int,
+        default=_env_keep(),
+        help="retain only the newest N archives after a successful backup "
+        "(0 = keep all; env TERRA_BACKUP_KEEP)",
     )
 
     verify = subparsers.add_parser("verify", help="verify hashes, member allowlist, and SQLite integrity")
@@ -471,6 +511,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"created: {archive_path}")
             print(f"size: {archive_size} bytes")
             print(f"sha256: {archive_sha256}")
+            for pruned in prune_old_archives(
+                archive_path.parent, args.keep, keep_path=archive_path
+            ):
+                print(f"pruned: {pruned}")
         else:
             manifest = verify_archive(args.archive)
             counts = manifest.get("counts", {})

@@ -175,7 +175,7 @@ class ImageJobManager:
                     self._env_int("TERRA_IMAGE_QUEUE_RETRY_AFTER", 120, 5, 3600)
                 )
             self._jobs[job.id] = job
-            self._persist_state()
+            await self._persist_state_async()
             self._metrics.record_image_job(
                 kind=job.kind,
                 quality=job.quality,
@@ -209,7 +209,7 @@ class ImageJobManager:
             job.error = "이미지 생성 작업이 취소되었습니다."
             job.updated_at = time.time()
             task = self._task_by_job.get(job_id)
-            self._persist_state()
+            await self._persist_state_async()
             self._record_phase_outcome(job, phase, "cancelled")
             self._metrics.record_image_job(
                 kind=job.kind,
@@ -234,7 +234,7 @@ class ImageJobManager:
                     job.status = "failed"
                     job.error = "서버 종료로 이미지 생성 작업이 중단되었습니다."
                     job.updated_at = now
-            self._persist_state()
+            await self._persist_state_async()
             for job, phase in interrupted:
                 self._record_phase_outcome(job, phase, "cancelled")
                 self._metrics.record_image_job(
@@ -329,26 +329,46 @@ class ImageJobManager:
         self._persist_state()
         return jobs
 
-    def _persist_state(self) -> None:
+    def _serialize_state(self) -> str | None:
+        """호출부의 락 아래에서 일관된 스냅샷 JSON을 만든다(경합 방지)."""
+        if self._state_path is None:
+            return None
+        recent = sorted(
+            self._jobs.values(),
+            key=lambda job: job.updated_at,
+            reverse=True,
+        )[:1000]
+        try:
+            return json.dumps([asdict(job) for job in recent], ensure_ascii=False)
+        except (TypeError, ValueError):
+            log.exception("could not serialize image job state")
+            return None
+
+    def _write_state(self, payload: str) -> None:
         if self._state_path is None:
             return
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            recent = sorted(
-                self._jobs.values(),
-                key=lambda job: job.updated_at,
-                reverse=True,
-            )[:1000]
             temporary = self._state_path.with_name(f".{self._state_path.name}.{os.getpid()}.tmp")
-            temporary.write_text(
-                json.dumps([asdict(job) for job in recent], ensure_ascii=False),
-                encoding="utf-8",
-            )
+            temporary.write_text(payload, encoding="utf-8")
             temporary.chmod(0o600)
             temporary.replace(self._state_path)
         except OSError:
             # 상태 저널 실패가 이미 비싼 생성 결과 자체를 실패시키면 안 된다.
             log.exception("could not persist image job state")
+
+    def _persist_state(self) -> None:
+        """동기 경로 — 이벤트 루프가 없는 초기 복원 시점에서만 사용한다."""
+        payload = self._serialize_state()
+        if payload is not None:
+            self._write_state(payload)
+
+    async def _persist_state_async(self) -> None:
+        """런타임 경로 — 직렬화는 락 안(호출부)에서, 블로킹 디스크 쓰기만 스레드로 넘겨
+        매 단계 전환 시 event loop이 멈추지 않게 한다."""
+        payload = self._serialize_state()
+        if payload is not None:
+            await asyncio.to_thread(self._write_state, payload)
 
     async def _run(
         self,
@@ -577,7 +597,7 @@ class ImageJobManager:
                 job.status = "failed"
                 job.error = self._public_failure_message(exc)
                 job.updated_at = time.time()
-                self._persist_state()
+                await self._persist_state_async()
                 self._record_phase_outcome(job, failed_phase, "failed")
                 self._metrics.record_image_job(
                     kind=job.kind,
@@ -612,7 +632,7 @@ class ImageJobManager:
                 job.status = "failed"
                 job.error = "이미지 생성 중 내부 오류가 발생했습니다."
                 job.updated_at = time.time()
-                self._persist_state()
+                await self._persist_state_async()
                 self._record_phase_outcome(job, failed_phase, "failed")
                 self._metrics.record_image_job(
                     kind=job.kind,
@@ -629,7 +649,7 @@ class ImageJobManager:
             job.url = final_url
             job.actual_seed = final_seed
             job.updated_at = time.time()
-            self._persist_state()
+            await self._persist_state_async()
             self._record_phase_outcome(job, completed_phase, current_phase_outcome)
             self._metrics.record_image_job(
                 kind=job.kind,
@@ -652,7 +672,7 @@ class ImageJobManager:
             if candidate_current is not None:
                 job.candidate_current = candidate_current
             job.updated_at = time.time()
-            self._persist_state()
+            await self._persist_state_async()
             if previous_phase != phase:
                 self._record_phase_outcome(job, previous_phase, previous_outcome)
 
