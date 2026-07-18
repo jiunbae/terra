@@ -240,7 +240,7 @@ def _build_verification_prompt(
 
 
 async def _generate_verification(prompt: str, mime_type: str, encoded_image: str) -> dict[str, Any]:
-    keys = gemini._load_keys()
+    keys = gemini._key_order()
     model = os.environ.get("GEMINI_VISION_MODEL") or gemini.MODEL
     body: dict[str, Any] = {
         "contents": [
@@ -263,7 +263,7 @@ async def _generate_verification(prompt: str, mime_type: str, encoded_image: str
     last_error = ""
     async with httpx.AsyncClient(timeout=120) as client:
         for attempt in range(len(keys) * 2):
-            key = gemini._next_key()
+            key = keys[attempt % len(keys)]
             try:
                 response = await client.post(
                     f"{gemini.BASE}/models/{model}:generateContent",

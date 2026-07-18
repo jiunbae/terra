@@ -54,6 +54,21 @@ def _next_key() -> str:
     return next(_key_cycle)
 
 
+def _key_order() -> list[str]:
+    """이번 호출이 시도할 키 순서 전체를 스냅샷으로 반환한다.
+
+    per-attempt로 전역 cycle을 소비하면 동시 요청이 서로의 next()를 가로채
+    한 요청이 같은 키만 반복 시도하고 정상 키를 한 번도 못 써보는 문제가
+    생긴다(예: 키 2개·동시 요청 2개 → 각자 한 키만 계속 뽑음). 시작 키만
+    전역 cycle로 분산하고, 나머지 순서는 호출 지역에서 결정해 각 요청이
+    한 라운드에 모든 키를 정확히 한 번씩 시도하도록 보장한다.
+    """
+    keys = _load_keys()
+    first = _next_key()
+    start = keys.index(first) if first in keys else 0
+    return keys[start:] + keys[:start]
+
+
 def _retry_delay() -> float:
     try:
         value = float(os.environ.get("TERRA_GEMINI_RETRY_DELAY", "2"))
@@ -70,7 +85,8 @@ async def generate_json(
     max_output_tokens: int = 65536,
 ) -> dict[str, Any]:
     """구조화 출력(generateContent + responseSchema)으로 JSON을 생성한다."""
-    n_keys = len(_load_keys())
+    keys = _key_order()
+    n_keys = len(keys)
     body: dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
@@ -87,7 +103,7 @@ async def generate_json(
     async with httpx.AsyncClient(timeout=timeout) as client:
         # 키당 최대 2바퀴 시도
         for attempt in range(n_keys * 2):
-            key = _next_key()
+            key = keys[attempt % n_keys]
             try:
                 resp = await client.post(
                     f"{BASE}/models/{MODEL}:generateContent",

@@ -84,6 +84,17 @@ class GeminiReliabilityTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"GEMINI_API_KEYS": "one, two, one"}, clear=False):
             self.assertEqual(gemini._load_keys(), ["one", "two"])
 
+    def test_key_order_is_full_rotation_per_call(self) -> None:
+        # 동시 요청이 서로의 draw를 가로채도, 각 호출은 모든 키를 정확히 한 번씩
+        # 담은 순열을 받아야 한다(정상 키를 못 써보는 문제 방지). 시작 키는 분산된다.
+        with patch.dict("os.environ", {"GEMINI_API_KEYS": "a,b,c"}, clear=False):
+            gemini._key_cycle = None  # 이전 테스트의 cycle 상태 초기화
+            orders = [gemini._key_order() for _ in range(3)]
+        for order in orders:
+            self.assertEqual(sorted(order), ["a", "b", "c"])
+        # 세 번의 호출이 서로 다른 키에서 시작해 부하를 분산한다.
+        self.assertEqual({order[0] for order in orders}, {"a", "b", "c"})
+
 
 class _TimeoutProcess:
     def __init__(self) -> None:
